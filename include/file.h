@@ -166,7 +166,7 @@ size_t entry_offset(size_t index, TABLE_STATE* table_state) {
 
 void tappend(void* entry, TABLE_STATE* table_state) { // TODO: add check if there is a free place in table
   fseek(table_state->file, table_state->append_offset, SEEK_SET);
-  size_t r = fwrite(entry, table_state->entry_size + table_state->entry_metadata_size, 1, table_state->file);
+  size_t r = fwrite(entry, table_state->entry_raw_size, 1, table_state->file);
   table_state->append_offset = ftell(table_state->file);
 }
 
@@ -196,17 +196,23 @@ void header_read(FILE* file, TABLE_STATE* table_state) {
   table_state->name_len = (unsigned char)info_header[data_offset+1];
   table_state->col_types = (size_t*)malloc(sizeof(size_t) * table_state->ncols);
 
-  table_state->entry_metadata_size = 3 * sizeof(size_t); // TODO: maybe refactor this somehow
   
-  size_t col_offset = table_state->entry_metadata_size;
   table_state->col_offsets = malloc(sizeof(size_t) * table_state->ncols);
   
+  size_t nkey_cols = 0;
+  size_t col_offset = 0;
   for (size_t i = 0; i < table_state->ncols; i++) {
     table_state->col_types[i] = (0xff&info_header[2*i+2+data_offset]) | (0xff00&(info_header[2*i+3+data_offset]<<8));
     table_state->entry_size += TYPE_SIZE(table_state->col_types[i]);
     table_state->col_offsets[i] = col_offset;
     col_offset += TYPE_SIZE(table_state->col_types[i]);
+    nkey_cols += IS_KEY(table_state->col_types[i]);
     printf("%ld\n", TYPE_SIZE(table_state->col_types[i]));
+  }
+
+  table_state->entry_metadata_size = nkey_cols * 3 * sizeof(size_t); // TODO: maybe refactor this somehow
+  for (size_t i = 0; i < table_state->ncols; i++) {
+    table_state->col_offsets[i] += table_state->entry_metadata_size;
   }
 
   table_state->col_names = (char**)malloc(sizeof(char*) * table_state->ncols);
@@ -233,18 +239,17 @@ void create_entry(TABLE_STATE* table_state, size_t nargs, ...) {
 
   va_list args;
   va_start(args, nargs);
-  char* data = malloc(table_state->entry_size + table_state->entry_metadata_size);
+  char* data = malloc(table_state->entry_raw_size);
   char* it = data;
 
   // TODO: maybe refactor this to tree handling
   // Allocation of parent, left and right leafs
   size_t treeval = 0;
-  memcpy(it, &treeval, sizeof(size_t));
-  it += sizeof(size_t) / sizeof(char);
-  memcpy(it, &treeval, sizeof(size_t));
-  it += sizeof(size_t) / sizeof(char);
-  memcpy(it, &treeval, sizeof(size_t));
-  it += sizeof(size_t) / sizeof(char);
+  char zero = 0;
+  for (size_t i = 0; i < table_state->entry_metadata_size; i++) {
+    memcpy(it, &zero, 1);
+    it++;
+  }
 
   for (size_t i = 0; i < nargs; i++) {
     if (TYPE_NUMBER(table_state->col_types[i]) == TABLE_TYPE_INT) {
