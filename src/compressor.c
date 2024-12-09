@@ -166,9 +166,9 @@ int main(int argc, char **argv)
     SET_BINARY_MODE(stdin);
     SET_BINARY_MODE(stdout);
 
-    FILE* in = fopen("file.bin", "rb+");
-    FILE* comp = fopen("file.binc", "rb+");
-    FILE* decomp = fopen("file.bind", "rb+");
+    FILE* in = fopen("data/file.bin", "rb+");
+    FILE* comp = fopen("data/file.binc", "rb+");
+    FILE* decomp = fopen("data/file.bind", "rb+");
 
     /* do compression if no arguments */
     if (argc == 1) {

@@ -3,7 +3,7 @@
 
 int main () {
   TABLE_STATE table_state = { 0 };
-  FILE* file = fopen("file.bin", "rb+");
+  FILE* file = fopen("data/file.bin", "rb+");
   if (!file) {
     return 1;
   }

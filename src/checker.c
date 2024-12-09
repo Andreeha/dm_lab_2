@@ -2,7 +2,7 @@
 #include <stdlib.h>
 
 int main () {
-  FILE* f = fopen("file.bin", "rb+");
+  FILE* f = fopen("data/file.bin", "rb+");
   fseek(f, 1084, SEEK_SET);
   char* buf = malloc(sizeof(char) * 74);
   fread(buf, 74, 1, f);

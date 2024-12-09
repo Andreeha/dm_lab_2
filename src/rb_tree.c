@@ -34,7 +34,7 @@ int main () {
 
   rbt->table_state = &table_state;
 
-  open_table("file.bin", &table_state);
+  open_table("data/file.bin", &table_state);
 
   rb_from_raw_table(rbt, &table_state);
 
