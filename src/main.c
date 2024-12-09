@@ -1,18 +1,19 @@
+#define TABLE_FILE_H_IMPLEMENTATION
 #include "file.h"
 
 int main () {
-  struct TABLE_STATE table_state = { 0 };
+  TABLE_STATE table_state = { 0 };
   FILE* file = fopen("file.bin", "rb+");
   if (!file) {
     return 1;
   }
   size_t col_types[4] = {
-    MAKE_TYPE(0, sizeof(int)),
+    MAKE_TYPE(0, sizeof(int)) | KEY_FIELD,
     MAKE_TYPE(1, sizeof(float)),
-    MAKE_TYPE(2, sizeof(char) * (1 + 10)),
+    MAKE_TYPE(3, sizeof(char) * DATETIME_SIZE),
     MAKE_TYPE(2, sizeof(char) * (1 + 30))
   };
-  const char* col_names[] = {"0", "1", "2", "3"};
+  const char* col_names[] = {"First", "Second", "Third", "Foutrth"};
   int w = 1;
   // scanf("%d", &w);
   if (w) {
@@ -30,7 +31,7 @@ int main () {
   fwrite(&buff, sizeof(char), 1, table_state.file);
 
   printf("entry size: %ld\n", table_state.entry_size + table_state.entry_metadata_size);
-  create_entry(ENTRY_CREATE, &table_state, 4, 1, 0.5, "0123456789", "012345678901234567890123456789");
+  create_entry(&table_state, 4, 1, 0.5, "01234567", "012345678901234567890123456789");
   commit_changes(&table_state);
   int v = 10;
   char* r1 = get_by_tindex(0, &table_state);
