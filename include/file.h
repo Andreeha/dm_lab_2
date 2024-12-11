@@ -10,10 +10,14 @@
 #include <rb.h>
 
 #define INFO_HEADER_LEN 64
-#define DATA_OFFSET (1 + 2 * sizeof(size_t) / sizeof(char))
+#define DATA_OFFSET (1+sizeof(size_t))
+#define NCOLS_OFFSET DATA_OFFSET
+#define FMLEN_OFFSET (1+NCOLS_OFFSET)
+#define COL_TYPES_OFFSET (1 + FMLEN_OFFSET)
 #define NAMES_OFFSET (INFO_HEADER_LEN + DATA_OFFSET)
 #define MAX_COL_NUMBER ((INFO_HEADER_LEN - 2) / 2)  // It takes 2 bytes for ncols and name_len
-                                                    // and 2 bytes per column to store
+                   
+                   // and 2 bytes per column to store
 #define MAX_COL_NAME_LEN (0xff - 1)
 
 // TODO: data type
@@ -31,14 +35,12 @@
 // Header view
 // [0]                                  [char] = sizeof(size_t) on the moment of table creation
 // [1]                                  [size_t] next_empty_space
-// ...
-// [1+sizeof(size_t)/sizeof(char)]      [size_t] position of the HEAD of RB-tree
-// ...
 // [1+DATA_OFFSET]                      [char] number of columns (MAX_NUMBER DEPENDS ON PLATFORM size_t)
 // [2+DATA_OFFSET]                      [char] max length of the field names
 // ...                                  <- column data types 2*char wide each
 // [NAMES_OFFSET]                       1st column name (name_len + 1) symbols wide
-// [INFO_HEADER_LEN+ncols*(name_len+1)] <- end of header
+// [INFO_HEADER_LEN+ncols*(name_len+1)] <- end of table data
+// 
 
 struct darray {
   size_t count, capacity;
@@ -59,6 +61,7 @@ struct darray {
         }
 
 typedef struct {
+  char version;
   size_t init;
   size_t header_offset;
   size_t offset;
@@ -67,6 +70,8 @@ typedef struct {
   size_t name_len;
   size_t* col_types;
   size_t* col_offsets;
+  size_t* key_col_relpos;
+  size_t* rb_heads;
   size_t entry_size;
   size_t entry_metadata_size;
   size_t entry_raw_size;
@@ -79,6 +84,8 @@ typedef struct {
   size_t type;
   char* data;
 } STAGE_EVENT;
+
+#define RB_DATA_SIZE (3 * sizeof(size_t))
 
 #define TABLE_TYPE_INT 0
 #define TABLE_TYPE_FLOAT 1
@@ -117,6 +124,15 @@ void display_entry(unsigned char* entry, size_t size);
 void rb_table_update(rbtree* rbt, rbnode* node);
 void rb_from_raw_table(rbtree* tree, TABLE_STATE* table_state);
 
+unsigned char table_version(FILE* file);
+size_t next_empty_read(FILE* file);
+size_t next_empty_update(TABLE_STATE* ts);
+unsigned char read_ncols(FILE* file);
+unsigned char read_name_len(FILE* file);
+void read_col_types(TABLE_STATE* table_state);
+char* read_field_name(size_t col, TABLE_STATE* ts);
+size_t read_rb_head(size_t col, TABLE_STATE* ts);
+
 #endif // TABLE_FILE_H
 
 #ifdef TABLE_FILE_H_IMPLEMENTATION
@@ -136,18 +152,25 @@ void header_write(size_t ncols, size_t name_len, size_t* col_types, const char**
   
   info_header[data_offset] = ncols;
   info_header[data_offset+1] = name_len;
+  size_t nkey_fields = 0;
   for (size_t i = 0; i < ncols; i++) {
     info_header[2*i+2+data_offset] = (col_types[i]) & 0xff;
     info_header[2*i+3+data_offset] = (col_types[i] >> 8) & 0xff;
+    nkey_fields += IS_KEY(col_types[i]);
   }
 
-  size_t header_size = sizeof(char)*(INFO_HEADER_LEN + ncols*(name_len+1));
+  size_t header_size = sizeof(char)*(INFO_HEADER_LEN + ncols*(name_len+1) + nkey_fields * sizeof(size_t));
   char* result = (char*)malloc(header_size);
   
   memcpy(result, info_header, NAMES_OFFSET);
   
   for (size_t i = 0; i < ncols; i++) {
-    strcpy(&(((char*)result)[NAMES_OFFSET + i * (name_len + 1)]), col_names[i]);
+    strcpy(&(result[NAMES_OFFSET + i * (name_len + 1)]), col_names[i]);
+  }
+
+  size_t zero = 0;
+  for (size_t t = 0; t < nkey_fields; t++) {
+    memcpy(&result[INFO_HEADER_LEN + ncols*(name_len+1) + t * sizeof(size_t)], &zero, sizeof(size_t));
   }
   
   rewind(file);
@@ -180,49 +203,112 @@ void tedit(void* data, TABLE_STATE* table_state) {
   fwrite(val, sizeof(char), TYPE_SIZE(table_state->col_types[col]), table_state->file);
 }
 
-void header_read(FILE* file, TABLE_STATE* table_state) {
-  rewind(file);
+unsigned char table_version(FILE* file) {
+  fseek(file, 0L, SEEK_SET);
+  char version;
+  fread(&version, sizeof(char), 1, file);
+  return version;
+}
 
-  char* info_header = (char*)malloc(sizeof(char) * INFO_HEADER_LEN);
-  size_t r;
-  r = fread(info_header, sizeof(char), INFO_HEADER_LEN, file);
-  assert(r == INFO_HEADER_LEN);
-  
-  assert(info_header[0] == sizeof(size_t)); // check for alignment compatibility
+size_t next_empty_read(FILE* file) {
+  fseek(file, 1, SEEK_SET);
+  size_t pos;
+  fread(&pos, sizeof(size_t), 1, file);
+  return pos;
+}
 
-  size_t data_offset = DATA_OFFSET;
+size_t next_empty_update(TABLE_STATE* ts) {
+  size_t curr_empty = next_empty_read(ts->file);
+  assert(curr_empty != 0);
+  // TODO: 
+}
 
-  table_state->ncols = info_header[data_offset];
-  table_state->name_len = (unsigned char)info_header[data_offset+1];
+unsigned char read_ncols(FILE* file) {
+  fseek(file, NCOLS_OFFSET, SEEK_SET);
+  char ncols;
+  fread(&ncols, sizeof(char), 1, file);
+  return ncols;
+}
+
+unsigned char read_name_len(FILE* file) {
+  fseek(file, FMLEN_OFFSET, SEEK_SET);
+  char mlen;
+  fread(&mlen, sizeof(char), 1, file);
+  return mlen;
+}
+
+// Reads col types and sets 
+// col_offsets
+// key_col_relpos
+// entry_metadata_size
+void read_col_types(TABLE_STATE* table_state) {
   table_state->col_types = (size_t*)malloc(sizeof(size_t) * table_state->ncols);
-
-  
   table_state->col_offsets = malloc(sizeof(size_t) * table_state->ncols);
-  
+  table_state->key_col_relpos = malloc(sizeof(size_t) * table_state->ncols);
   size_t nkey_cols = 0;
   size_t col_offset = 0;
+  size_t key_col_relpos = 0;
+  fseek(table_state->file, COL_TYPES_OFFSET, SEEK_SET);
   for (size_t i = 0; i < table_state->ncols; i++) {
-    table_state->col_types[i] = (0xff&info_header[2*i+2+data_offset]) | (0xff00&(info_header[2*i+3+data_offset]<<8));
-    table_state->entry_size += TYPE_SIZE(table_state->col_types[i]);
+    char ttype_[2];
+    fread(ttype_  , sizeof(char), 2, table_state->file);
+    size_t type_ = table_state->col_types[i] = (0xff&ttype_[0]) | (0xff00&(ttype_[1]<<8));
+    table_state->entry_size += TYPE_SIZE(type_);
     table_state->col_offsets[i] = col_offset;
-    col_offset += TYPE_SIZE(table_state->col_types[i]);
-    nkey_cols += IS_KEY(table_state->col_types[i]);
-    printf("%ld\n", TYPE_SIZE(table_state->col_types[i]));
+    table_state->key_col_relpos[i] = (IS_KEY(type_) ? key_col_relpos : 0);
+    col_offset += TYPE_SIZE(type_);
+    key_col_relpos += IS_KEY(type_);
+    nkey_cols += IS_KEY(type_);
+    printf("%ld\n", TYPE_SIZE(type_));
   }
 
-  table_state->entry_metadata_size = nkey_cols * 3 * sizeof(size_t); // TODO: maybe refactor this somehow
+  table_state->entry_metadata_size = nkey_cols * RB_DATA_SIZE;
   for (size_t i = 0; i < table_state->ncols; i++) {
     table_state->col_offsets[i] += table_state->entry_metadata_size;
   }
+}
+
+char* read_field_name(size_t col, TABLE_STATE* ts) {
+  fseek(ts->file, NAMES_OFFSET + col * (ts->name_len + 1), SEEK_SET);
+  char* name = malloc(sizeof(char) * (ts->name_len+1));
+  fread(name, 1, ts->name_len + 1, ts->file);
+  return name;
+}
+
+size_t read_rb_head(size_t col, TABLE_STATE* ts) {
+  if (!IS_KEY(ts->col_types[col])) {
+    return 0;
+  }
+  size_t offset = ts->key_col_relpos[col] * sizeof(size_t) + INFO_HEADER_LEN + ts->ncols*(ts->name_len+1);
+  fseek(ts->file, offset, SEEK_SET);
+  size_t rb_head;
+  fread(&rb_head, sizeof(size_t), 1, ts->file);
+  return rb_head;
+}
+
+void header_read(FILE* file, TABLE_STATE* table_state) {
+  rewind(file);
+
+  table_state->file      = file;
+  table_state->version   = table_version(file);
+  assert(table_state->version == sizeof(size_t));
+  table_state->ncols     = read_ncols(file);
+  table_state->name_len  = read_name_len(file);
+
+  read_col_types(table_state);
 
   table_state->col_names = (char**)malloc(sizeof(char*) * table_state->ncols);
 
-  fseek(file, NAMES_OFFSET, SEEK_SET);
   for (size_t i = 0; i < table_state->ncols; i++) {
-    table_state->col_names[i] = malloc(sizeof(char) * (1 + table_state->name_len));
-    r = fread(table_state->col_names[i], sizeof(char), 1 + table_state->name_len, file);
+    table_state->col_names[i] = read_field_name(i, table_state);
   }
-  table_state->header_offset = INFO_HEADER_LEN + table_state->ncols * (table_state->name_len + 1);
+
+  table_state->rb_heads = malloc(sizeof(size_t) * table_state->name_len)  ;
+  for (size_t i = 0; i < table_state->ncols; i++) {
+    table_state->rb_heads = read_rb_head(i, table_state);
+  }
+
+  table_state->header_offset = INFO_HEADER_LEN + table_state->ncols * ((table_state->name_len + 1) + sizeof(size_t));
   fseek(file, 0L, SEEK_END);
   table_state->append_offset = ftell(file);
   rewind(file);
@@ -230,7 +316,6 @@ void header_read(FILE* file, TABLE_STATE* table_state) {
   table_state->init = 1;
   table_state->stage = (struct darray){ 0 };
   table_state->entry_raw_size = table_state->entry_metadata_size + table_state->entry_size;
-  free(info_header);
 }
 
 void create_entry(TABLE_STATE* table_state, size_t nargs, ...) {
