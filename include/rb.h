@@ -27,7 +27,7 @@ typedef struct rbnode {
 } rbnode;
 
 typedef struct {
-	int (*compare)(const void *, const void *);
+	int (*compare)(const void*, const void *, const void *);
 	void (*print)(void *);
 	void (*destroy)(void *);
 
@@ -40,6 +40,7 @@ typedef struct {
 
   size_t col;
   void* table_state;
+  void* copy_data;
 } rbtree;
 
 #define RB_ROOT(rbt) (&(rbt)->root)
@@ -50,7 +51,7 @@ typedef struct {
 #define RB_ISEMPTY(rbt) ((rbt)->root.left == &(rbt)->nil && (rbt)->root.right == &(rbt)->nil)
 #define RB_APPLY(rbt, f, c, o) rbapply_node((rbt), (rbt)->root.left, (f), (c), (o))
 
-rbtree *rb_create(int (*compare_func)(const void *, const void *), void (*destroy_func)(void *));
+rbtree *rb_create(int (*compare_func)(const void*, const void *, const void *), void (*destroy_func)(void *));
 void rb_destroy(rbtree *rbt);
 
 size_t rb_find(rbtree *rbt, void *data);

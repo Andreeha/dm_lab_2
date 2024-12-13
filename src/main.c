@@ -3,10 +3,6 @@
 
 int main () {
   TABLE_STATE table_state = { 0 };
-  FILE* file = fopen("data/file.bin", "rb+");
-  if (!file) {
-    return 1;
-  }
   size_t col_types[4] = {
     MAKE_TYPE(0, sizeof(int)) | KEY_FIELD,
     MAKE_TYPE(1, sizeof(float)),
@@ -14,13 +10,24 @@ int main () {
     MAKE_TYPE(2, sizeof(char) * (1 + 30))
   };
   const char* col_names[] = {"First", "Second", "Third", "Foutrth"};
-  int w = 1;
-  // scanf("%d", &w);
-  if (w) {
-    header_write(4, MAX_COL_NAME_LEN, col_types, col_names, file);
+  #ifdef CREATE_TABLE
+    create_table(4, MAX_COL_NAME_LEN, col_types, col_names, "data/file.bin");
+  #endif
+
+  FILE* file = fopen("data/file.bin", "rb+");
+  if (!file) {
+    return 1;
   }
 
   header_read(file, &table_state);
+  int a;
+  scanf("%d", &a);
+  create_entry(&table_state, 4, a, 0.123, "76543210", "012345678901234567890123456789");
+  commit_changes(&table_state);
+
+  char* r0 = get_by_tindex(0, &table_state);
+  display_entry(r0, table_state.entry_raw_size);
+  return 0;
 
   printf("ncols: %ld name_len: %ld\n", table_state.ncols, table_state.name_len);
   for (int i = 0; i < table_state.ncols; i++) {

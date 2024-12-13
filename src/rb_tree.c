@@ -5,7 +5,8 @@
 #define TABLE_FILE_H_IMPLEMENTATION
 #include "file.h"
 
-int compare_func(const void* ra, const void* rb) {
+int compare_func(const void* rbt, const void* ra, const void* rb) {
+  TABLE_STATE* ts = ((rbtree*)rbt)->table_state;
   int a = ((size_t*)ra)[1];
   int b = ((size_t*)rb)[1];
   if (a == b) return 0;
@@ -18,27 +19,22 @@ void destroy_func(void* a) {
 }
 
 void print_char_func(void* a) {
-  printf("%ld", ((size_t*)a)[1]);
+  printf("%d ", *(int*)&((size_t*)a)[4]);
 }
 
 int main () {
   rbtree *rbt;
 	
 	/* create a red-black tree */
-	if ((rbt = rb_create(compare_func, destroy_func)) == NULL) {
-		fprintf(stderr, "create red-black tree failed\n");
-		return 1;
-	}
 
   TABLE_STATE table_state = { 0 };
 
-  rbt->table_state = &table_state;
-
   open_table("data/file.bin", &table_state);
 
-  rb_from_raw_table(rbt, &table_state);
+  // rb_from_raw_table(rbt, &table_state);
+  rbt = rb_restore_from_table(0, &table_state, compare_func);
 
-  close_table(&table_state);
+//  close_table(&table_state);
 
 /*
 	char a[] = {'R', 'E', 'D', 'S', 'O', 'X', 'C', 'U', 'B', 'T'};
