@@ -18,12 +18,12 @@ static void print(rbtree *rbt, size_t n_ptr, void (*print_func)(void *), int dep
 static void destroy(rbtree *rbt, rbnode *node);
 
 static size_t read_rb_data_by_index(rbtree *rbt, size_t node_ptr, size_t rb_index) {
-  if (!node_ptr || !(node_ptr+1)) {
+  if (!(node_ptr+1)) {
     return BLACK;
   }
   size_t rb_data;
   TABLE_STATE* ts = rbt->table_state;
-  size_t offset = entry_offset(node_ptr - 1, ts) + rbt->col * RB_DATA_SIZE + sizeof(size_t) * rb_index;
+  size_t offset = entry_offset(node_ptr, ts) + rbt->col * RB_DATA_SIZE + sizeof(size_t) * rb_index;
   fseek(ts->file, offset, SEEK_SET);
   fread(&rb_data, sizeof(size_t), 1, ts->file);
   return rb_data;
@@ -43,9 +43,9 @@ static size_t get_color (rbtree *rbt, size_t node_ptr) {
 }
 
 static size_t write_rb_data_by_index(rbtree *rbt, size_t node_ptr, size_t value, size_t rb_index) {
-  assert(node_ptr && (node_ptr+1));
+  assert(node_ptr+1);
   TABLE_STATE* ts = rbt->table_state;
-  size_t offset = entry_offset(node_ptr - 1, ts) + rbt->col * RB_DATA_SIZE + sizeof(size_t) * rb_index;
+  size_t offset = entry_offset(node_ptr, ts) + rbt->col * RB_DATA_SIZE + sizeof(size_t) * rb_index;
   fseek(ts->file, offset, SEEK_SET);
   return fwrite(&value, sizeof(size_t), 1, ts->file);
 }
@@ -55,18 +55,12 @@ static size_t set_left_from_root (rbtree *rbt, size_t node_ptr, size_t value) {
   return write_rb_head(rbt->col, value, rbt->table_state);
 }
 static size_t set_left (rbtree *rbt, size_t node_ptr, size_t value) {
-  if (!(node_ptr + 1)) {
-    return set_left_from_root(rbt, node_ptr, value);
-  }
   return write_rb_data_by_index(rbt, node_ptr, value, RB_INDEX_LEFT);
 }
 static size_t set_right (rbtree *rbt, size_t node_ptr, size_t value) {
   return write_rb_data_by_index(rbt, node_ptr, value, RB_INDEX_RIGHT);
 }
 static size_t set_parent (rbtree *rbt, size_t node_ptr, size_t value) {
-  if (value == -1) {
-    write_rb_head(rbt->col, value, rbt->table_state);
-  }
   return write_rb_data_by_index(rbt, node_ptr, value, RB_INDEX_PARENT);
 }
 static size_t set_color (rbtree *rbt, size_t node_ptr, size_t value) {
@@ -84,21 +78,17 @@ static size_t set_rb_data(rbtree *rbt, void *data, void *rb_data) {
 
 static void* get_data(rbtree *rbt, size_t node_ptr) {
   TABLE_STATE* ts = rbt->table_state;
-  size_t offset = entry_offset(node_ptr-1, ts);
+  size_t offset = entry_offset(node_ptr, ts);
   fseek(ts->file, offset, SEEK_SET);
   fread(rbt->copy_data, ts->entry_raw_size, 1, ts->file);
   return rbt->copy_data;
 }
 
+#define RB_ROOT_PTR 0
+#define RB_NIL_PTR (-1)
+
 static size_t RB_FIRST_PTR(rbtree* rbt) {
-  TABLE_STATE* ts = rbt->table_state;
-  size_t rb_head = read_rb_head(ts->key_col_relpos[rbt->col], ts);
-  if (rb_head == -1) {
-    return 0;
-  } else if (rb_head == 0) {
-    assert(0 && "Table isn't written correctly");
-  }
-  return rb_head;
+  return get_left(rbt, 0);
 }
 
 rbtree* rb_restore_from_table(size_t col, TABLE_STATE* table_state, int (*cmp)(const void*, const void*, const void*)) {
@@ -106,6 +96,7 @@ rbtree* rb_restore_from_table(size_t col, TABLE_STATE* table_state, int (*cmp)(c
   rbt->table_state = table_state;
   rbt->col = col;
   rbt->copy_data = malloc(table_state->entry_raw_size);
+  set_color(rbt, 0, BLACK);
   return rbt;
 }
 
@@ -135,7 +126,7 @@ rbtree *rb_create(int (*compare)(const void*, const void *, const void *), void 
 	rbt->root.data = NULL;
 
 	#ifdef RB_MIN
-	rbt->min_ptr = 0; // = NULL;
+	rbt->min_ptr = RB_NIL_PTR; // = NULL;
 	#endif
 
   rbt->table_state = NULL;
@@ -166,9 +157,10 @@ size_t rb_find(rbtree *rbt, void *data)
 	//p = RB_FIRST(rbt);
   p_ptr = RB_FIRST_PTR(rbt);
 
-	while (p_ptr != 0) { // != RB_NIL(rbt)) {
+	while (p_ptr != RB_NIL_PTR) { // != RB_NIL(rbt)) {
 		int cmp;
-		cmp = rbt->compare(rbt, data, get_data(rbt, p_ptr));
+    void* d = get_data(rbt, p_ptr);
+		cmp = rbt->compare(rbt, data, d);
 		if (cmp == 0)
 			return p_ptr; /* found */
 		// p = cmp < 0 ? p->left : p->right;
@@ -190,11 +182,11 @@ size_t rb_successor(rbtree *rbt, size_t node_ptr)
 	// p = node->right;
   p_ptr = get_right(rbt, node_ptr);
 
-	if (p_ptr != 0) {
+	if (p_ptr != RB_NIL_PTR) {
 		/* move down until we find it */
-		// for ( ; p->left != RB_NIL(rbt); p = p->left) ;
+		// for ( ; p->left != RB_NIL_PTR(rbt); p = p->left) ;
     size_t pleft = get_left(rbt, p_ptr);
-    for (; pleft != 0; ) {
+    for (; pleft != RB_NIL_PTR; ) {
       p_ptr = pleft;
       pleft = get_left(rbt, p_ptr);
     }
@@ -203,8 +195,8 @@ size_t rb_successor(rbtree *rbt, size_t node_ptr)
 		// for (p = node->parent; node == p->right; node = p, p = p->parent) ;
     for (p_ptr = get_parent(rbt, node_ptr); node_ptr == get_right(rbt, p_ptr); node_ptr = p_ptr, p_ptr = get_parent(rbt, p_ptr));
 
-		if (p_ptr == -1)// RB_ROOT(rbt))
-			p_ptr = 0; /* not found */
+		if (p_ptr == RB_ROOT_PTR)// RB_ROOT_PTR(rbt))
+			p_ptr = RB_NIL_PTR; /* not found */
 	}
 
 	return p_ptr;
@@ -219,7 +211,7 @@ int rb_apply(rbtree *rbt, size_t node_ptr, int (*func)(void *, void *), void *co
 	int err;
 
 
-	if (node_ptr != 0) { //RB_NIL(rbt)) {
+	if (node_ptr != RB_NIL_PTR) { //RB_NIL(rbt)) {
     void* d = get_data(rbt, node_ptr);
 		if (order == PREORDER && (err = func(d, cookie)) != 0) /* preorder */
 			return err;
@@ -250,8 +242,8 @@ void rotate_left(rbtree *rbt, size_t x_ptr)
 	/* tree x */
 	// x->right = y->left;
   set_right(rbt, x_ptr, get_left(rbt, y_ptr));
-	// if (x->right != RB_NIL(rbt)) {
-  if (get_right(rbt, x_ptr) != 0) {
+	// if (x->right != RB_NIL_PTR(rbt)) {
+  if (get_right(rbt, x_ptr) != RB_NIL_PTR) {
 		// x->right->parent = x;
     set_parent(rbt, get_right(rbt, x_ptr), x_ptr);
     //rb_table_update(rbt, x);
@@ -292,8 +284,8 @@ void rotate_right(rbtree *rbt, size_t x_ptr)
 	/* tree x */
 	// x->left = y->right;
   set_left(rbt, x_ptr, get_right(rbt, y_ptr));
-	// if (x->left != RB_NIL(rbt)) {
-  if (get_left(rbt, x_ptr) != 0) {
+	// if (x->left != RB_NIL_PTR(rbt)) {
+  if (get_left(rbt, x_ptr) != RB_NIL_PTR) {
 		// x->left->parent = x;
     set_parent(rbt, get_left(rbt, x_ptr), x_ptr);
     //rb_table_update(rbt, x->left);
@@ -335,12 +327,12 @@ size_t rb_insert(rbtree *rbt, void *data)
 	/* do a binary search to find where it should be */
 
 	// current = RB_FIRST(rbt);
-	// parent = RB_ROOT(rbt);
+	// parent = RB_ROOT_PTR(rbt);
   current_ptr = RB_FIRST_PTR(rbt);
-  parent_ptr = -1;
+  parent_ptr = RB_ROOT_PTR;
 
-	// while (current != RB_NIL(rbt)) {
-  while (current_ptr != 0) {
+	// while (current != RB_NIL_PTR(rbt)) {
+  while (current_ptr != RB_NIL_PTR) {
 		int cmp;
     void* d = get_data(rbt, current_ptr);
 		cmp = rbt->compare(rbt, data, d);
@@ -364,7 +356,7 @@ size_t rb_insert(rbtree *rbt, void *data)
 	// if (current == NULL)
 	//	return NULL; /* out of memory */
 
-	// current->left = current->right = RB_NIL(rbt);
+	// current->left = current->right = RB_NIL_PTR(rbt);
 	// current->parent = parent;
 	// current->color = RED;
 	// current->data = data;
@@ -375,10 +367,12 @@ size_t rb_insert(rbtree *rbt, void *data)
   // rb_data[RB_INDEX_COLOR] = RED;
   // set_rb_data(rbt, data, rb_data); // TODO : ?
   set_parent(rbt, current_ptr, parent_ptr);
+  set_left(rbt, current_ptr, RB_NIL_PTR);
+  set_right(rbt, current_ptr, RB_NIL_PTR);
   set_color(rbt, current_ptr, RED);
 
   
-	if (parent_ptr == -1 || rbt->compare(rbt, data, get_data(rbt, parent_ptr)) < 0)
+	if (parent_ptr == RB_ROOT_PTR || rbt->compare(rbt, data, get_data(rbt, parent_ptr)) < 0)
 		// parent->left = current;
     set_left(rbt, parent_ptr, current_ptr);
 	else
@@ -387,7 +381,7 @@ size_t rb_insert(rbtree *rbt, void *data)
   //rb_table_update(rbt, parent);
 
 	#ifdef RB_MIN
-	if (rbt->min_ptr == 0 || rbt->compare(rbt, get_data(rbt, current_ptr), get_data(rbt, rbt->min_ptr)) < 0)
+	if (rbt->min_ptr == RB_NIL_PTR || rbt->compare(rbt, get_data(rbt, current_ptr), get_data(rbt, rbt->min_ptr)) < 0)
 		rbt->min_ptr = current_ptr;
 	#endif
 	
@@ -405,7 +399,7 @@ size_t rb_insert(rbtree *rbt, void *data)
 	 *     split, and insert grandparent node into parent cluster
 	 */
 	// if (current->parent->color == RED) {
-  if (get_color(rbt, get_parent(rbt, current_ptr))) {
+  if (get_color(rbt, get_parent(rbt, current_ptr)) == RED) {
 		/* insertion into 3-children cluster (parent node is RED) */
 		/* insertion into 4-children cluster (parent node is RED) */
 		insert_repair(rbt, current_ptr);
@@ -427,7 +421,7 @@ size_t rb_insert(rbtree *rbt, void *data)
 
 /*
  * rebalance after insertion
- * RB_ROOT(rbt) is always BLACK, thus never reach beyond RB_FIRST(rbt)
+ * RB_ROOT_PTR(rbt) is always BLACK, thus never reach beyond RB_FIRST(rbt)
  * after insert_repair, RB_FIRST(rbt) might be RED
  */
 void insert_repair(rbtree *rbt, size_t current_ptr)
@@ -542,8 +536,8 @@ void rb_delete(rbtree *rbt, size_t node_ptr, int keep)
 
 	/* choose node's in-order successor if it has two children */
 	
-	// if (node->left == RB_NIL(rbt) || node->right == RB_NIL(rbt)) {
-  if (get_left(rbt, node_ptr) == 0 || get_right(rbt, node_ptr) == 0) {
+	// if (node->left == RB_NIL_PTR(rbt) || node->right == RB_NIL(rbt)) {
+  if (get_left(rbt, node_ptr) == RB_NIL_PTR || get_right(rbt, node_ptr) == RB_NIL_PTR) {
 		target_ptr = node_ptr;
 
 		#ifdef RB_MIN
@@ -561,8 +555,8 @@ void rb_delete(rbtree *rbt, size_t node_ptr, int keep)
 		#endif
 	}
 
-	// child = (target->left == RB_NIL(rbt)) ? target->right : target->left; /* child may be NIL */
-  child_ptr = (get_left(rbt, target_ptr) == 0 ? get_right(rbt, target_ptr) : get_left(rbt, target_ptr));
+	// child = (target->left == RB_NIL_PTR(rbt)) ? target->right : target->left; /* child may be NIL */
+  child_ptr = (get_left(rbt, target_ptr) == RB_NIL_PTR ? get_right(rbt, target_ptr) : get_left(rbt, target_ptr));
 
 	/*
 	 * deletion from red-black tree
@@ -605,7 +599,7 @@ void rb_delete(rbtree *rbt, size_t node_ptr, int keep)
 		/* deletion from 3-children cluster (RED target node) */
 	}
 
-	if (child_ptr != 0) { // RB_NIL(rbt)) {
+	if (child_ptr != RB_NIL_PTR) { // RB_NIL(rbt)) {
 		// child->parent = target->parent;
     set_parent(rbt, child_ptr, get_parent(rbt, target_ptr));
     //rb_table_update(rbt, child);
@@ -794,7 +788,7 @@ int rb_check_order(rbtree *rbt, void *min, void *max)
  */
 int check_order(rbtree *rbt, size_t n_ptr, void *min, void *max)
 {
-	if (n_ptr == 0) // == RB_NIL(rbt))
+	if (n_ptr == RB_NIL_PTR) // == RB_NIL(rbt))
 		return 1;
 
 	#ifdef RB_DUP
@@ -829,7 +823,7 @@ int check_black_height(rbtree *rbt, size_t n_ptr)
 {
 	int lbh, rbh;
 
-	if (n_ptr == 0) // RB_NIL(rbt))
+	if (n_ptr == RB_NIL_PTR) // RB_NIL(rbt))
 		return 1;
 
 	// if (n->color == RED && (n->left->color == RED || n->right->color == RED || n->parent->color == RED))
@@ -866,7 +860,7 @@ void rb_print(rbtree *rbt, void (*print_func)(void *))
  */
 void print(rbtree *rbt, size_t n_ptr, void (*print_func)(void *), int depth, char *label)
 {
-	if (n_ptr != 0) { // RB_NIL(rbt)) {
+	if (n_ptr != RB_NIL_PTR) { // RB_NIL(rbt)) {
 		print(rbt, get_right(rbt, n_ptr), print_func, depth + 1, "R");
 		printf("%*s", 8 * depth, "");
 		if (label)
@@ -883,7 +877,7 @@ void print(rbtree *rbt, size_t n_ptr, void (*print_func)(void *), int depth, cha
 void destroy(rbtree *rbt, rbnode *n)
 {
 /*
-	if (n != RB_NIL(rbt)) {
+	if (n != RB_NIL_PTR(rbt)) {
 		destroy(rbt, n->left);
 		destroy(rbt, n->right);
 		rbt->destroy(n->data);

@@ -12,6 +12,7 @@ int main () {
   const char* col_names[] = {"First", "Second", "Third", "Foutrth"};
   #ifdef CREATE_TABLE
     create_table(4, MAX_COL_NAME_LEN, col_types, col_names, "data/file.bin");
+    return 0;
   #endif
 
   FILE* file = fopen("data/file.bin", "rb+");
@@ -24,8 +25,15 @@ int main () {
   scanf("%d", &a);
   create_entry(&table_state, 4, a, 0.123, "76543210", "012345678901234567890123456789");
   commit_changes(&table_state);
+  
+  char* data = get_by_tindex(0, &table_state);
 
-  char* r0 = get_by_tindex(0, &table_state);
+  memcpy(&data[32], &a, sizeof(int));
+  
+  size_t index = find_entry(0, data, &table_state); 
+
+  char* r0 = get_by_tindex(index, &table_state);
+  printf("found: %ld\n", index);
   display_entry(r0, table_state.entry_raw_size);
   return 0;
 

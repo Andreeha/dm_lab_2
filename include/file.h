@@ -143,7 +143,7 @@ unsigned char read_ncols(FILE* file);
 unsigned char read_name_len(FILE* file);
 void read_col_types(TABLE_STATE* table_state);
 char* read_field_name(size_t col, TABLE_STATE* ts);
-size_t read_rb_head(size_t col, TABLE_STATE* ts);
+size_t* read_rb_head(size_t col, TABLE_STATE* ts);
 size_t write_rb_head(size_t col, size_t rb_head, TABLE_STATE* ts);
 rbtree* rb_restore_from_table(size_t col, TABLE_STATE* table_state, int (*cmp)(const void*, const void*, const void*));
 
@@ -155,6 +155,8 @@ int cmp_float   (const void* rb, const void* a, const void* b);
 int cmp_str     (const void* rb, const void* a, const void* b);
 int cmp_datatime(const void* rb, const void* a, const void* b);
 void _destroy(void* a);
+
+size_t find_entry(size_t col, void* value, TABLE_STATE* table_state);
 
 #endif // TABLE_FILE_H
 
@@ -211,7 +213,7 @@ void add_stage_deleted(TABLE_STATE* ts, size_t val) {
 
 size_t get_stage_next_free(TABLE_STATE* ts) {
   if (ts->stage_next_free) {
-    size_t offset = entry_offset(ts->stage_next_free - 1, ts);
+    size_t offset = entry_offset(ts->stage_next_free, ts);
     size_t curr = ts->stage_next_free;
     size_t next_free;
     if (ts->stage_deleted == NULL) {
@@ -226,7 +228,7 @@ size_t get_stage_next_free(TABLE_STATE* ts) {
     }
     return curr;
   } else {
-    size_t curr = 1 + (ts->stage_append_offset - ts->header_offset) / ts->entry_raw_size;
+    size_t curr = (ts->stage_append_offset - ts->header_offset) / ts->entry_raw_size;
     ts->stage_append_offset += ts->entry_raw_size;
     return curr;
   }
@@ -248,13 +250,15 @@ void header_write(size_t ncols, size_t name_len, size_t* col_types, const char**
   info_header[data_offset] = ncols;
   info_header[data_offset+1] = name_len;
   size_t nkey_fields = 0;
+  size_t entry_size = 0;
   for (size_t i = 0; i < ncols; i++) {
     info_header[2*i+2+data_offset] = (col_types[i]) & 0xff;
     info_header[2*i+3+data_offset] = (col_types[i] >> 8) & 0xff;
     nkey_fields += IS_KEY(col_types[i]);
+    entry_size += TYPE_SIZE(col_types[i]);
   }
 
-  size_t header_size = NAMES_OFFSET + ncols*(name_len+1) + nkey_fields * sizeof(size_t);
+  size_t header_size = NAMES_OFFSET + ncols*(name_len+1) + nkey_fields * RB_DATA_SIZE;
   char* result = (char*)malloc(header_size);
   
   memcpy(result, info_header, NAMES_OFFSET);
@@ -263,11 +267,11 @@ void header_write(size_t ncols, size_t name_len, size_t* col_types, const char**
     strcpy(&(result[NAMES_OFFSET + i * (name_len + 1)]), col_names[i]);
   }
 
-  size_t rb_root = -1;
+  size_t rb_nil[4] = {-1,-1,-1,-1};
 
   size_t rb_offset = NAMES_OFFSET + ncols*(name_len+1);
   for (size_t t = 0; t < nkey_fields; t++) {
-    memcpy(&result[rb_offset + t * sizeof(size_t)], &rb_root, sizeof(size_t));
+    memcpy(&result[rb_offset + t * RB_DATA_SIZE], &rb_nil, RB_DATA_SIZE);
     fprintf(stderr, "%ld: %lx\n", t, *(size_t*)&result[rb_offset + t * sizeof(size_t)]);
   }
   size_t index = 0;
@@ -284,6 +288,8 @@ void header_write(size_t ncols, size_t name_len, size_t* col_types, const char**
   
   rewind(file);
   fwrite(result, header_size, 1, file);
+  char zero = 0;
+  for (size_t i = 0; i < entry_size; i++) fwrite(&zero, 1, 1, file);
   free(result);
   free(info_header);
 }
@@ -397,15 +403,19 @@ char* read_field_name(size_t col, TABLE_STATE* ts) {
   return name;
 }
 
-size_t read_rb_head(size_t col, TABLE_STATE* ts) {
+size_t *read_rb_head(size_t col, TABLE_STATE* ts) {
   if (!IS_KEY(ts->col_types[col])) {
     return 0;
   }
-  size_t offset = ts->key_col_relpos[col] * sizeof(size_t) + NAMES_OFFSET + ts->ncols*(ts->name_len+1);
+  // size_t offset = ts->key_col_relpos[col] * sizeof(size_t) + NAMES_OFFSET + ts->ncols*(ts->name_len+1);
+  size_t offset = 
+    NAMES_OFFSET + 
+    ts->ncols*(ts->name_len+1) +
+    ts->key_col_relpos[col] * RB_DATA_SIZE;
   fseek(ts->file, offset, SEEK_SET);
-  size_t rb_head;
-  fread(&rb_head, sizeof(size_t), 1, ts->file);
-  return rb_head;
+  size_t rb_head[RB_DATA_LEN];
+  fread(&rb_head, RB_DATA_SIZE, 1, ts->file);
+  return NULL;
 }
 
 size_t write_rb_head(size_t col, size_t rb_head, TABLE_STATE* ts) {
@@ -435,12 +445,15 @@ void header_read(FILE* file, TABLE_STATE* table_state) {
     table_state->col_names[i] = read_field_name(i, table_state);
   }
 
+  table_state->header_offset = ftell(file); // INFO_HEADER_LEN + table_state->ncols * ((table_state->name_len + 1) + sizeof(size_t));
+
+
   table_state->rb_trees = malloc(sizeof(rbtree*) * table_state->nkey_cols);
   for (size_t i = 0; i < table_state->nkey_cols; i++) {
     read_rb_head(i, table_state);
   }
 
-  table_state->header_offset = ftell(file); // INFO_HEADER_LEN + table_state->ncols * ((table_state->name_len + 1) + sizeof(size_t));
+  
   fseek(file, 0L, SEEK_END);
   table_state->stage_append_offset = table_state->append_offset = ftell(file);
   printf("header_offset: %lx\nappend_offset: %lx\n", table_state->header_offset, table_state->append_offset);
@@ -598,6 +611,7 @@ void display_entry(unsigned char* entry, size_t size) {
 }
 
 void rb_table_update(rbtree* rbt, rbnode* node) {
+  return;
   if (node->data == NULL)
     return;
 
@@ -632,11 +646,19 @@ void rb_from_raw_table(rbtree* rbt, TABLE_STATE* table_state) {
     char* entry = malloc(table_state->entry_raw_size);
     size_t r = fread(entry, sizeof(char), table_state->entry_raw_size, table_state->file);
 
-    char *val = malloc(sizeof(size_t) + TYPE_SIZE(table_state->col_types[0]));
-    memcpy(val, &i, sizeof(size_t));
-    memcpy(val + sizeof(size_t) / sizeof(char), &entry[table_state->col_offsets[0]], TYPE_SIZE(table_state->col_types[0]));
-    rb_insert(rbt, val);
-    free(entry);
+    // char *val = malloc(sizeof(size_t) + TYPE_SIZE(table_state->col_types[0]));
+    // memcpy(val, &i, sizeof(size_t));
+    // memcpy(val + sizeof(size_t) / sizeof(char), &entry[table_state->col_offsets[0]], TYPE_SIZE(table_state->col_types[0]));
+    rb_insert(rbt, entry);
+  }
+}
+
+size_t find_entry(size_t col, void* value, TABLE_STATE* table_state) {
+  size_t is_key = IS_KEY(table_state->col_types[col]);
+  assert(is_key);
+  if (is_key) {
+    size_t index = rb_find(table_state->rb_trees[table_state->key_col_relpos[col]], value);
+    return index;
   }
 }
 
