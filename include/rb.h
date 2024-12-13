@@ -35,9 +35,10 @@ typedef struct {
 	rbnode nil;
 
 	#ifdef RB_MIN
-	rbnode *min;
+	size_t min_ptr;
 	#endif
 
+  size_t col;
   void* table_state;
 } rbtree;
 
@@ -52,14 +53,14 @@ typedef struct {
 rbtree *rb_create(int (*compare_func)(const void *, const void *), void (*destroy_func)(void *));
 void rb_destroy(rbtree *rbt);
 
-rbnode *rb_find(rbtree *rbt, void *data);
-rbnode *rb_successor(rbtree *rbt, rbnode *node);
+size_t rb_find(rbtree *rbt, void *data);
+size_t rb_successor(rbtree *rbt, size_t node_ptr);
 
-int rb_apply_node(rbtree *rbt, rbnode *node, int (*func)(void *, void *), void *cookie, enum rbtraversal order);
+int rb_apply_node(rbtree *rbt, size_t node_ptr, int (*func)(void *, void *), void *cookie, enum rbtraversal order);
 void rb_print(rbtree *rbt, void (*print_func)(void *));
 
-rbnode *rb_insert(rbtree *rbt, void *data);
-void *rb_delete(rbtree *rbt, rbnode *node, int keep);
+size_t rb_insert(rbtree *rbt, void *data);
+void rb_delete(rbtree *rbt, size_t node_ptr, int keep);
 
 int rb_check_order(rbtree *rbt, void *min, void *max);
 int rb_check_black_height(rbtree *rbt);

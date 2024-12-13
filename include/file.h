@@ -85,7 +85,12 @@ typedef struct {
   char* data;
 } STAGE_EVENT;
 
-#define RB_DATA_SIZE (3 * sizeof(size_t))
+#define RB_DATA_LEN 4
+#define RB_DATA_SIZE (RB_DATA_LEN * sizeof(size_t))
+#define RB_INDEX_PARENT 0
+#define RB_INDEX_LEFT   1
+#define RB_INDEX_RIGHT  2
+#define RB_INDEX_COLOR  3
 
 #define TABLE_TYPE_INT 0
 #define TABLE_TYPE_FLOAT 1
