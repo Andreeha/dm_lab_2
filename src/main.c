@@ -1,73 +1,107 @@
 #define TABLE_FILE_H_IMPLEMENTATION
 #include "file.h"
+#include <ctype.h>
+
+#define TKN_FLOAT 0
+#define TKN_INT   1
+#define TKN_WORD  2
+#define TKN_OP    3
+#define TKN_STR   4
+
+typedef struct {
+  size_t position;
+  size_t type;
+  char* content;
+} Token;
+
+Token* get_token_word(FILE* file) {
+  Token *tkn = malloc(sizeof(Token));
+  tkn->content = malloc(256 * sizeof(char));
+  tkn->position = ftell(file);
+  char c;
+  size_t index = 0;
+  while ((c = getc(file)) != EOF && (isalpha(c) || isdigit(c) || c == '_')) {
+    tkn->content[index++] = c;
+  }
+  tkn->content[index] = 0;
+  tkn->type = TKN_WORD;
+  return tkn;
+}
+
+Token* get_token_str(FILE* file) {
+  Token *tkn = malloc(sizeof(Token));
+  tkn->content = malloc(256 * sizeof(char));
+  tkn->position = ftell(file);
+  char c, p = '"';
+  size_t index = 0;
+  while ((c = getc(file)) != EOF && (isalpha(c) || isdigit(c) || c == '_' || (c == '"' && p == '\\'))) {
+    tkn->content[index++] = p = c;
+  }
+  tkn->content[index] = 0;
+  tkn->type = TKN_STR;
+  return tkn;
+}
+
+Token* get_token_number(FILE* file) {
+  Token *tkn = malloc(sizeof(Token));
+  tkn->content = malloc(256 * sizeof(char));
+  tkn->position = ftell(file);
+  char c;
+  size_t index = 0, dot = 0;
+  while ((c = getc(file)) != EOF && (isdigit(c) || (c == '.' && dot++ == 0))) {
+    tkn->content[index++] = c; 
+  }
+  if (dot) tkn->type = TKN_FLOAT;
+  else tkn->type = TKN_INT;
+  return tkn;
+}
+
+void* tokenize(const char* file_name, Token*** tokens) {
+  struct darray tkns;
+  FILE* file = fopen(file_name, "rb+");
+  char c;
+  while((c = getc(file)) != EOF) {
+    size_t position = ftell(file) - 1;
+    Token *tkn;
+    if (c == '"') {
+      tkn = get_token_str(file);
+      da_append(&tkns, tkn);
+      continue;
+    } else if (isalpha(c)) {
+      fseek(file, position, SEEK_SET);
+      tkn = get_token_word(file);
+    } else if (isspace(c)) {
+      continue;
+    } else if (isdigit(c)) {
+      fseek(file, position, SEEK_SET);
+      tkn = get_token_number(file);
+    } else { // special symbol
+      tkn = malloc(sizeof(Token));
+      tkn->position = position;
+      tkn->content = malloc(sizeof(char));
+      tkn->content[0] = c;
+      tkn->type = TKN_OP;
+      da_append(&tkns, tkn);
+      continue;
+    }
+    fseek(file, -1, SEEK_CUR);
+    da_append(&tkns, tkn);
+  }
+  for (size_t i = 0; i < tkns.count; i++) {
+    printf("pos: %ld type: %ld content: `%s'\n", ((Token**)tkns.items)[i]->position, ((Token**)tkns.items)[i]->type, ((Token**)tkns.items)[i]->content);
+  }
+  if (tokens)
+    *tokens = tkns.items;
+}
+
+size_t is_update(size_t offset, const Token** tokens) {
+  if (0 == strcmp(tokens[offset]->content, "UPDATE")) {
+    
+  }
+}
 
 int main () {
-  TABLE_STATE table_state = { 0 };
-  size_t col_types[4] = {
-    MAKE_TYPE(0, sizeof(int)) | KEY_FIELD,
-    MAKE_TYPE(1, sizeof(float)),
-    MAKE_TYPE(3, sizeof(char) * DATETIME_SIZE),
-    MAKE_TYPE(2, sizeof(char) * (1 + 30))
-  };
-  const char* col_names[] = {"First", "Second", "Third", "Foutrth"};
-  #ifdef CREATE_TABLE
-    create_table(4, MAX_COL_NAME_LEN, col_types, col_names, "data/file.bin");
-    return 0;
-  #endif
-
-  FILE* file = fopen("data/file.bin", "rb+");
-  if (!file) {
-    return 1;
-  }
-
-  header_read(file, &table_state);
-  int a;
-  scanf("%d", &a);
-  create_entry(&table_state, 4, a, 0.123, "76543210", "012345678901234567890123456789");
-  commit_changes(&table_state);
-  
-  char* data = get_by_tindex(0, &table_state);
-
-  memcpy(&data[32], &a, sizeof(int));
-  
-  // delete_entry(0, data, &table_state);
-  void* entries;
-  size_t number = find_entry(2, "76543210", &table_state, &entries); 
-  printf("found %ld entries\n", number);
-  for (size_t i = 0; i < number; i++) {
-    display_entry(((void**)entries)[i], table_state.entry_raw_size); 
-  }
-
-
-  // char* r0 = get_by_tindex(index, &table_state);
-  // printf("found: %ld\n", index);
-  // display_entry(r0, table_state.entry_raw_size);
-  return 0;
-
-  printf("ncols: %ld name_len: %ld\n", table_state.ncols, table_state.name_len);
-  for (int i = 0; i < table_state.ncols; i++) {
-    printf("raw type: %ld col_name: `%s'\n", table_state.col_types[i], table_state.col_names[i]);
-  }
-  char buff = 0xFF; 
-  fseek(table_state.file, 1085, SEEK_SET);
-  fwrite(&buff, sizeof(char), 1, table_state.file);
-
-  printf("entry size: %ld\n", table_state.entry_size + table_state.entry_metadata_size);
-  create_entry(&table_state, 4, 1, 0.5, "01234567", "012345678901234567890123456789");
-  commit_changes(&table_state);
-  int v = 10;
-  char* r1 = get_by_tindex(0, &table_state);
-  display_entry(r1, table_state.entry_metadata_size + table_state.entry_size);
-  printf("\nr1: %d\n", *(int*)&r1[table_state.col_offsets[0]]);
-  edit_entry(0, 0, &v, &table_state);
-  commit_changes(&table_state);
-//  char* r2 = get_by_tindex(0, &table_state);
-//  printf("r1: %d\n", *(int*)&r2[table_state.col_offsets[0]]);
-//  commit_changes(&table_state);
-  free(r1);
-//  free(r2);
-
-  fclose(file);
-
+  Token** tokens;
+  tokenize("data/program.txt", &tokens);
   return 0;
 }

@@ -16,27 +16,29 @@ SRC="./src/"
 
 echo [COMPILE] ${SRC}rb.c
 gcc -c ${SRC}rb.c -o ./lib/rb.o $INCLUDE $DEBUG
-#echo [BUILD] ${SRC}rb_tree.c
-#gcc -o ${BUILD}rb_tree ${SRC}rb_tree.c $INCLUDE $LIBS $DEBUG
 
-#echo [BUILD] ${src}compressor
-#gcc -o ${BUILD}compressor ${SRC}compressor.c $INCLUDE $ZLIB $DEBUG
+# echo [BUILD] ${SRC}rb_tree.c
+# gcc -o ${BUILD}rb_tree ${SRC}rb_tree.c $INCLUDE $LIBS $DEBUG
+#
+# echo [BUILD] ${src}compressor
+# gcc -o ${BUILD}compressor ${SRC}compressor.c $INCLUDE $ZLIB $DEBUG
+#
+# echo [BUILD] ${src}insert.c
+# gcc -o ${BUILD}insert ${SRC}insert.c $INCLUDE $LIBS $DEBUG
+# 
+# echo [BUILD] ${src}delete.c
+# gcc -o ${BUILD}delete ${SRC}delete.c $INCLUDE $LIBS $DEBUG
+# 
+# echo [BUILD] ${src}create.c
+# gcc -o ${BUILD}create ${SRC}create.c $INCLUDE $LIBS $DEBUG
 
-#echo [BUILD] ${src}main.c
-#gcc -o ${BUILD}main ${SRC}main.c $INCLUDE $LIBS $DEBUG
+echo [BUILD] ${src}main.c
+gcc -o ${BUILD}main ${SRC}main.c $INCLUDE $LIBS $DEBUG
 
-echo [BUILD] ${src}insert.c
-gcc -o ${BUILD}insert ${SRC}insert.c $INCLUDE $LIBS $DEBUG
-
-echo [BUILD] ${src}delete.c
-gcc -o ${BUILD}delete ${SRC}delete.c $INCLUDE $LIBS $DEBUG
-
-echo [BUILD] ${src}create.c
-gcc -o ${BUILD}create ${SRC}create.c $INCLUDE $LIBS $DEBUG
-
-#echo [BUILD] ${src}main.c -> cmain
-#gcc -o ${BUILD}cmain ${SRC}main.c $INCLUDE $LIBS $DEBUG -DCREATE_TABLE 2> /dev/null
-#echo [BUILD] ${src}main.c to 32-bit
-#gcc -o ${BUILD}main32 -m32 ${SRC}main.c $INCLUDE $LIBS $DEBUG 2> /dev/null
+# echo [BUILD] ${src}main.c -> cmain
+# gcc -o ${BUILD}cmain ${SRC}main.c $INCLUDE $LIBS $DEBUG -DCREATE_TABLE 2> /dev/null
+#
+# echo [BUILD] ${src}main.c to 32-bit
+# gcc -o ${BUILD}main32 -m32 ${SRC}main.c $INCLUDE $LIBS $DEBUG 2> /dev/null
 
 
