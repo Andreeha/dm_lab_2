@@ -158,42 +158,37 @@ void zerr(int ret)
     }
 }
 
-int main(int argc, char **argv)
-{
+int archive(int decompress, const char* table_name, const char* backup_name)
+{  
+  if (access(table_name, F_OK) != 0) {
+    FILE* file = fopen(table_name, "ab+");
+    fclose(file);
+  }
+  if (access(backup_name, F_OK) != 0) {
+    FILE* file = fopen(backup_name, "ab+");
+    fclose(file);
+  }
     int ret;
 
-    /* avoid end-of-line conversions */
-    SET_BINARY_MODE(stdin);
-    SET_BINARY_MODE(stdout);
+    FILE* table = fopen(table_name, "rb+");
+    FILE* backup = fopen(backup_name, "rb+");
 
-    FILE* in = fopen("data/file.bin", "rb+");
-    FILE* comp = fopen("data/file.binc", "rb+");
-    FILE* decomp = fopen("data/file.bind", "rb+");
-
-    /* do compression if no arguments */
-    if (argc == 1) {
-        ret = def(in, comp, Z_DEFAULT_COMPRESSION);
+    if (!decompress) {
+        ret = def(table, backup, Z_DEFAULT_COMPRESSION);
         if (ret != Z_OK)
             zerr(ret);
-        fflush(comp);
+        fflush(backup);
     }
 
     /* do decompression if -d specified */
-    else if (argc == 2 && strcmp(argv[1], "-d") == 0) {
-        ret = inf(comp, decomp);
+    else if (decompress) {
+        ret = inf(backup, table);
         if (ret != Z_OK)
             zerr(ret);
-        fflush(decomp);
+        fflush(table);
     }
 
-    /* otherwise, report usage */
-    else {
-        fputs("zpipe usage: zpipe [-d] < source > dest\n", stderr);
-        ret = 1;
-    }
-    fclose(in);
-    fclose(comp);
-    fclose(decomp);
-    printf("%d\n", ret);
+    fclose(table);
+    fclose(backup);
     return ret;
 }

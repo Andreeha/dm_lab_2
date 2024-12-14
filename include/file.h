@@ -132,7 +132,7 @@ size_t close_table(TABLE_STATE *table_state);
 size_t delete_table(const char* file_name);
 size_t erase_table(const char* file_name);
 size_t save_table(TABLE_STATE* table_state);
-void display_entry(unsigned char* entry, size_t size);
+void display_entry(unsigned char* entry, size_t size, TABLE_STATE* table_state);
 
 void rb_table_update(rbtree* rbt, rbnode* node);
 void rb_from_raw_table(rbtree* tree, TABLE_STATE* table_state);
@@ -160,11 +160,38 @@ int (*pick_cmp(size_t type))(const void*, const void*, const void*);
 void _destroy(void* a);
 
 size_t find_entry(size_t col, void* value, TABLE_STATE* table_state, void** result, size_t** indices);
+size_t beautiful_find_entry(size_t col, void* value, TABLE_STATE* table_state, void** result, size_t** indices);
 size_t delete_entry(size_t col, void* value, TABLE_STATE* table_state);
+
+int archive(int type, const char* table_name, const char* backup_name);
+size_t restore_from_backup(const char* file_name, const char* backup_name);
+size_t create_backup(const char* file_name, const char* backup_name);
+
+size_t encode_datatime(size_t Y, size_t M, size_t D, size_t h, size_t m, size_t s, size_t ms);
 
 #endif // TABLE_FILE_H
 
 #ifdef TABLE_FILE_H_IMPLEMENTATION
+
+size_t encode_datatime(size_t Y, size_t M, size_t D, size_t h, size_t m, size_t s, size_t ms) {
+  // [ms][ms]s[ms]mshmhDMDYMYY
+  size_t res = ms&0xff;
+  res <<= 8;
+  res |= ((s&0x0f)<<4)+((ms&0xf00)>>8);
+  res <<= 8;
+  res |= ((s&0xf0)>>4)+((m&0x0f)<<4);
+  res <<= 8;
+  res |= ((m&0xf0)>>4)+((h&0x0f)<<4);
+  res <<= 8;
+  res |= ((h&0xf0)>>4)+((D&0x0f)<<4);
+  res <<= 8;
+  res |= ((D&0xf0)>>4)+((M&0x0f)<<4);
+  res <<= 8;
+  res |= ((M&0xf0)>>4)+((Y&0xf00)>>4);
+  res <<= 8;
+  res |= Y&0xff;
+  return res;
+}
 
 int (*pick_cmp(size_t type_))(const void*, const void*, const void*) {
   if (TYPE_NUMBER(type_) == TABLE_TYPE_INT)
@@ -217,8 +244,11 @@ int cmp_datatime(const void* rb, const void* a, const void* b) {
   size_t offset = ts->col_offsets[rbt->col];
   char* l = &((char*)a)[offset];
   char* r = &((char*)b)[offset];
-  // return strcmp(l, r);
-  return 0; // TODO : 
+  for (size_t i = 0; i < DATATIME_SIZE; i++) {
+    if (l[i] < r[i]) return -1;
+    if (r[i] > l[i]) return 1;
+  }
+  return 0;
 }
 
 /*
@@ -354,22 +384,34 @@ void tedit(void* data, TABLE_STATE* table_state) {
   size_t size = TYPE_SIZE(table_state->col_types[col]);
   void* old_value = &((char*)data)[sizeof(size_t)];
   void* new_value = &((char*)data)[sizeof(size_t) + size];
-  void* entries;
   size_t* indices;
-  size_t count = find_entry(col, old_value, table_state, &entries, &indices);
+  size_t count = beautiful_find_entry(col, old_value, table_state, NULL, &indices);
+  char* new_data = get_by_tindex(0, table_state);
+  memcpy(&new_data[table_state->col_offsets[col]], new_value, TYPE_SIZE(table_state->col_types[col]));
+
+  if(IS_KEY(table_state->col_types[col])) {
+    size_t c = find_entry(col, new_data, table_state, NULL, NULL);
+    if (c != 0) {
+      if (count) free(indices);
+      free(new_data);
+      return; // entry with same value already exist
+    }
+  }
 
   for (size_t i = 0; i < count; i++) {
     table_state->last_inserted = indices[i];
     if (IS_KEY(table_state->col_types[col])) {
       rbtree* rbt = table_state->rb_trees[table_state->key_col_relpos[col]];
       rb_delete(rbt, indices[i], 1);
-      rb_insert(rbt, new_value);
+      rb_insert(rbt, new_data);
     } else {
       size_t offset = entry_offset(indices[i], table_state);
       fseek(table_state->file, offset + table_state->col_offsets[col], SEEK_SET);
-      fwrite(&((char*)data)[table_state->col_offsets[col]], TYPE_SIZE(table_state->col_types[col]), 1, table_state->file);
+      fwrite(&((char*)new_data)[table_state->col_offsets[col]], TYPE_SIZE(table_state->col_types[col]), 1, table_state->file);
     }
   }
+  if (count) free(indices);
+  free(new_data);
 }
 
 size_t tdelete(void *data, TABLE_STATE* table_state) {
@@ -384,9 +426,29 @@ size_t tdelete(void *data, TABLE_STATE* table_state) {
     for (size_t i = 0; *index && i < table_state->nkey_cols; i++) {
       rb_delete(table_state->rb_trees[i], *index, 0);
     }
+    if (query) free(query);
     return *index;
   } else {
-    assert(0 && "Not implemented yet");
+    size_t *indices;
+    size_t count = find_entry(col, query, table_state, NULL, &indices);
+    for (size_t i = 0; i < count; i++) {
+      for (size_t j = 0; j < table_state->nkey_cols; j++) {
+        rb_delete(table_state->rb_trees[j], indices[i], 1);
+      }
+      // set_free(indices[i])
+      size_t next_empty = next_empty_read(table_state->file);
+      next_empty_write(table_state->file, indices[i]);
+      
+      size_t offset_parent = entry_offset(indices[i], table_state) + 0 + sizeof(size_t) * RB_INDEX_PARENT;
+      fseek(table_state->file, offset_parent, SEEK_SET);
+      fwrite(&next_empty, sizeof(size_t), 1, table_state->file);
+      
+      size_t offset_color = entry_offset(indices[i], table_state) + 0 + sizeof(size_t) * RB_INDEX_COLOR;
+      fseek(table_state->file, offset_color, SEEK_SET);
+      size_t minusone = -1;
+      fwrite(&minusone, sizeof(size_t), 1, table_state->file);
+    }
+    if (query) free(query);
   }
 }
 
@@ -625,7 +687,9 @@ size_t create_table(size_t ncols, size_t name_len, size_t* col_types, const char
 }
 
 size_t open_table(const char* file_name, TABLE_STATE* table_state) {
-  assert(access(file_name, F_OK) == 0); // Check if the file does exist
+  if (access(file_name, F_OK) != 0) { // Check if the file does exist
+    return 1;
+  }
   FILE* file = fopen(file_name, "rb+");
   header_read(file, table_state);
   return 0;
@@ -656,11 +720,46 @@ size_t save_table(TABLE_STATE* table_state) {
   commit_changes(table_state);
 }
 
-void display_entry(unsigned char* entry, size_t size) {
+void display_entry(unsigned char* entry, size_t size, TABLE_STATE *table_state) {
+  #ifdef DEBUG
   printf("sz: %ld\n", size);
   for (size_t i = 0; i < size; i+=2) {
-    printf("%02x%02x ", entry[i], entry[i+1]);
+    if (i + 1 < size) printf("%02x%02x ", entry[i], entry[i+1]);
+    if (i + 1 == size) printf("%02x", entry[i]);
     if (i % 16 == 14) printf("\n");
+  }
+  printf("\n");
+  #endif
+  for (size_t i = 0; i < table_state->ncols; i++) {
+    printf("[%ld]: ", i);
+    if (TYPE_NUMBER(table_state->col_types[i]) == TABLE_TYPE_INT) {
+      printf("%s: %d\n", table_state->col_names[i], *(int*)&entry[table_state->col_offsets[i]]);
+    }
+    if (TYPE_NUMBER(table_state->col_types[i]) == TABLE_TYPE_FLOAT) {
+      printf("%s: %f\n", table_state->col_names[i], *(float*)&entry[table_state->col_offsets[i]]);
+    }
+    if (TYPE_NUMBER(table_state->col_types[i]) == TABLE_TYPE_DATATIME) {
+      int Y =    (int)entry[table_state->col_offsets[i]]                // e8
+            +  (((int)entry[table_state->col_offsets[i] + 1]&0xf0)<<4); // 7
+      int M =  (((int)entry[table_state->col_offsets[i] + 1]&0x0f)<<4)  //  0
+            +  (((int)entry[table_state->col_offsets[i] + 2]&0xf0)>>4); // c
+      int D =  (((int)entry[table_state->col_offsets[i] + 2]&0x0f)<<4)  //  0
+            +  (((int)entry[table_state->col_offsets[i] + 3]&0xf0)>>4); // e
+      int h =  (((int)entry[table_state->col_offsets[i] + 3]&0x0f)<<4)  //  0
+            +  (((int)entry[table_state->col_offsets[i] + 4]&0xf0)>>4); // b
+      int m =  (((int)entry[table_state->col_offsets[i] + 4]&0x0f)<<4)  //  0
+            +  (((int)entry[table_state->col_offsets[i] + 5]&0xf0)>>4); // b
+      int s =  (((int)entry[table_state->col_offsets[i] + 5]&0x0f)<<4)  //  0
+            +  (((int)entry[table_state->col_offsets[i] + 6]&0xf0)>>4); // b
+      int ms = (((int)entry[table_state->col_offsets[i] + 6]&0x0f)<<8)  //  0
+            +  (((int)entry[table_state->col_offsets[i] + 7]&0xff));    // 7b
+      printf("%s: Y%04d M%02d D%02d h%02d m%02d s%02d ms%02d\n", 
+              table_state->col_names[i],
+              Y, M, D, h, m, s, ms);
+    }
+    if (TYPE_NUMBER(table_state->col_types[i]) == TABLE_TYPE_VARCHAR) {
+      printf("%s: `%s'\n", table_state->col_names[i], &entry[table_state->col_offsets[i]]);
+    }
   }
   printf("\n");
 }
@@ -708,12 +807,15 @@ void rb_from_raw_table(rbtree* rbt, TABLE_STATE* table_state) {
   }
 }
 
+// must free all entries
 size_t find_entry(size_t col, void* value, TABLE_STATE* table_state, void** result, size_t** indices) {
   size_t is_key = IS_KEY(table_state->col_types[col]);
   if (is_key) {
     size_t index = rb_find(table_state->rb_trees[table_state->key_col_relpos[col]], value);
     if (result && index) {
-      *result = get_by_tindex(index, table_state);
+      void** a = malloc(sizeof(void*));
+      a[0] = get_by_tindex(index, table_state);
+      *result = a;
     }
     if (indices && index) {
       *indices = malloc(sizeof(size_t));
@@ -730,20 +832,35 @@ size_t find_entry(size_t col, void* value, TABLE_STATE* table_state, void** resu
     size_t diff = (table_state->append_offset - table_state->header_offset); 
     size_t len = diff / table_state->entry_raw_size;
     // fprintf(stderr, "DIFF: %ld Len: %ld\n", diff, len);
+    size_t count = 0;
     for (size_t i = 1; i < len; i++) {
       void* entry = get_by_tindex(i, table_state);  
       // display_entry(entry, table_state->entry_raw_size);
+      if (((size_t*)entry)[RB_INDEX_COLOR] == -1) // deleted row
+        continue;
       if (rbt.compare(&rbt, value, entry) == 0) {
-        da_append(&entr, entry);
-        da_append(&indx, i);
+        count++;
+        if (result)
+          da_append(&entr, entry);
+        if (indices)
+          da_append(&indx, i);
       }
+      if (!result) free(entry);
     }
     if (result)
       *result = entr.items;
     if (indices)
       *indices = indx.items;
-    return entr.count;
+    return count;
   }
+}
+
+size_t beautiful_find_entry(size_t col, void* value, TABLE_STATE* table_state, void** result, size_t** indices) {
+  char* query = get_by_tindex(0, table_state);
+  memcpy(&query[table_state->col_offsets[col]], value, TYPE_SIZE(table_state->col_types[col]));
+  size_t ret = find_entry(col, query, table_state, result, indices);
+  free(query);
+  return ret;
 }
 
 size_t delete_entry(size_t col, void* value, TABLE_STATE* table_state) {
@@ -767,6 +884,14 @@ size_t edit_entry(size_t col, void* old_value, void* new_value, TABLE_STATE* tab
   memcpy(&se->data[sizeof(size_t) + size], new_value, size);
   da_append(&table_state->stage, se);
   return 0;
+}
+
+size_t create_backup(const char* file_name, const char* backup_name) {
+  archive(0, file_name, backup_name);
+}
+
+size_t restore_from_backup(const char* file_name, const char* backup_name) {
+  archive(1, file_name, backup_name);
 }
 
 #endif // TABLE_FILE_H_IMPLEMENTATION
