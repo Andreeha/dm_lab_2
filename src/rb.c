@@ -68,7 +68,11 @@ static size_t set_color (rbtree *rbt, size_t node_ptr, size_t value) {
 }
 
 static size_t set_free  (rbtree *rbt, size_t node_ptr) {
-  assert(0 && "Not impl yet");
+  TABLE_STATE* ts = rbt->table_state;
+  size_t next_empty = next_empty_read(ts->file);
+  next_empty_write(ts->file, node_ptr);
+  set_parent(rbt, node_ptr, next_empty);
+  set_color(rbt, node_ptr, -1);
 }
 
 static size_t set_rb_data(rbtree *rbt, void *data, void *rb_data) {
@@ -82,6 +86,13 @@ static void* get_data(rbtree *rbt, size_t node_ptr) {
   fseek(ts->file, offset, SEEK_SET);
   fread(rbt->copy_data, ts->entry_raw_size, 1, ts->file);
   return rbt->copy_data;
+}
+
+static size_t set_data(rbtree *rbt, size_t node_ptr, void* data) {
+  TABLE_STATE* ts = rbt->table_state;
+  size_t offset = entry_offset(node_ptr, ts);
+  fseek(ts->file, offset + ts->col_offsets[rbt->col], SEEK_SET);
+  return fwrite(&((char*)data)[ts->col_offsets[rbt->col]], TYPE_SIZE(ts->col_types[rbt->col]), 1, ts->file);
 }
 
 #define RB_ROOT_PTR 0
@@ -360,12 +371,13 @@ size_t rb_insert(rbtree *rbt, void *data)
 	// current->parent = parent;
 	// current->color = RED;
 	// current->data = data;
-  current_ptr = get_stage_next_free(rbt->table_state);
+  current_ptr = ((TABLE_STATE*)rbt->table_state)->last_inserted;
   // size_t rb_data[RB_DATA_LEN];
   // rb_data[RB_INDEX_PARENT] = parent_ptr;
   // rb_data[RB_INDEX_LEFT] = rb_data[RB_INDEX_RIGHT] = 0;
   // rb_data[RB_INDEX_COLOR] = RED;
   // set_rb_data(rbt, data, rb_data); // TODO : ?
+  set_data(rbt, current_ptr, data);
   set_parent(rbt, current_ptr, parent_ptr);
   set_left(rbt, current_ptr, RB_NIL_PTR);
   set_right(rbt, current_ptr, RB_NIL_PTR);
@@ -614,12 +626,11 @@ void rb_delete(rbtree *rbt, size_t node_ptr, int keep)
     set_right(rbt, get_parent(rbt, target_ptr), child_ptr);
   //rb_table_update(rbt, target->parent);
 
-	set_free(rbt, target_ptr);
-	
 	/* keep or discard data */
 	if (keep == 0) {
 		// rbt->destroy(data);
 		// data = NULL;
+	  set_free(rbt, target_ptr);
 	}
 
 	// return data;

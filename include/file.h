@@ -46,18 +46,16 @@ struct darray {
   void** items;
 };
 
-#define da_append(da, item) {\
-          if ((da)->count == (da)->capacity) {\
-            (da)->capacity = ((da)->capacity + 1) * 2;\
-            void** tmp = malloc(sizeof(void*) * (da)->capacity);\
-            if ((da)->items) {\
-              memcpy(tmp, (da)->items, (da)->count);\
-              free((da)->items);\
-            }\
-            (da)->items = tmp;\
-          }\
-          (da)->items[(da)->count++] = item;\
-        }
+#define da_append(xs, x)                                                             \
+    do {                                                                             \
+        if ((xs)->count >= (xs)->capacity) {                                         \
+            if ((xs)->capacity == 0) (xs)->capacity = 256;                           \
+            else (xs)->capacity *= 2;                                                \
+            (xs)->items = realloc((xs)->items, (xs)->capacity*sizeof(*(xs)->items)); \
+        }                                                                            \
+                                                                                     \
+        (xs)->items[(xs)->count++] = (x);                                            \
+    } while (0)
 
 typedef struct {
   size_t value;
@@ -82,10 +80,11 @@ typedef struct {
   size_t entry_raw_size;
   char** col_names;
   struct darray stage;
-  stack* stage_deleted;
-  size_t stage_next_free;
+  // stack* stage_deleted;
+  // size_t stage_next_free;
   size_t stage_append_offset;
   FILE* file;
+  size_t last_inserted;
 } TABLE_STATE;
 
 typedef struct {
@@ -103,12 +102,14 @@ typedef struct {
 #define TABLE_TYPE_INT 0
 #define TABLE_TYPE_FLOAT 1
 #define TABLE_TYPE_VARCHAR 2
-#define TABLE_TYPE_DATETIME 3
-#define DATETIME_SIZE 8 // Y0xfff M0xff D0xff h0xff m0xff s0xff ms0xfff
+#define TABLE_TYPE_DATATIME 3
+#define DATATIME_SIZE 8 // Y0xfff M0xff D0xff h0xff m0xff s0xff ms0xfff
 #define VARCHAR_MAX_LEN (0xffffff - 1)
 
-#define SE_CREATE 1
-#define SE_EDIT 2
+#define SE_CREATE        0
+#define SE_DELETE        1
+#define SE_EDIT          2
+#define SE_EDIT_SELECTED 3
 
 void header_write(size_t ncols, size_t name_len, size_t* col_types, const char** col_names, FILE* file);
 void header_read(FILE* file, TABLE_STATE* table_state);
@@ -119,7 +120,7 @@ void tedit(void* data, TABLE_STATE* table_state);
 
 size_t entry_offset(size_t index, TABLE_STATE* table_state);
 void create_entry(TABLE_STATE* table_state, size_t nargs, ...);
-void edit_entry(size_t entry_index, size_t column_number, void* new_val, TABLE_STATE* table_state);
+size_t edit_entry(size_t col, void* old_val, void* new_val, TABLE_STATE* table_state);
 
 void commit_changes(TABLE_STATE* table_state);
 
@@ -138,7 +139,8 @@ void rb_from_raw_table(rbtree* tree, TABLE_STATE* table_state);
 
 unsigned char table_version(FILE* file);
 size_t next_empty_read(FILE* file);
-size_t next_empty_update(TABLE_STATE* ts);
+size_t next_empty_write(FILE* file, size_t node_ptr);
+size_t next_empty_withdraw(TABLE_STATE* ts);
 unsigned char read_ncols(FILE* file);
 unsigned char read_name_len(FILE* file);
 void read_col_types(TABLE_STATE* table_state);
@@ -154,13 +156,28 @@ int cmp_int     (const void* rb, const void* a, const void* b);
 int cmp_float   (const void* rb, const void* a, const void* b);
 int cmp_str     (const void* rb, const void* a, const void* b);
 int cmp_datatime(const void* rb, const void* a, const void* b);
+int (*pick_cmp(size_t type))(const void*, const void*, const void*);
 void _destroy(void* a);
 
-size_t find_entry(size_t col, void* value, TABLE_STATE* table_state);
+size_t find_entry(size_t col, void* value, TABLE_STATE* table_state, void** result, size_t** indices);
+size_t delete_entry(size_t col, void* value, TABLE_STATE* table_state);
 
 #endif // TABLE_FILE_H
 
 #ifdef TABLE_FILE_H_IMPLEMENTATION
+
+int (*pick_cmp(size_t type_))(const void*, const void*, const void*) {
+  if (TYPE_NUMBER(type_) == TABLE_TYPE_INT)
+    return cmp_int;
+  if (TYPE_NUMBER(type_) == TABLE_TYPE_FLOAT)
+    return cmp_float;
+  if (TYPE_NUMBER(type_) == TABLE_TYPE_VARCHAR)
+    return cmp_str;
+  if (TYPE_NUMBER(type_) == TABLE_TYPE_DATATIME)
+    return cmp_datatime;
+  assert(0 && "should never happen");
+  return NULL;
+}
 
 void _destroy(void* a) {
   free(a);
@@ -204,13 +221,16 @@ int cmp_datatime(const void* rb, const void* a, const void* b) {
   return 0; // TODO : 
 }
 
+/*
 void add_stage_deleted(TABLE_STATE* ts, size_t val) {
-  stack* q = malloc(sizeof(stack));
-  q->value = val;
-  q->next = ts->stage_deleted;
-  ts->stage_deleted = q;
+  //stack* q = malloc(sizeof(stack));
+  //q->value = val;
+  //q->next = ts->stage_deleted;
+  //ts->stage_deleted = q;
 }
+*/
 
+/*
 size_t get_stage_next_free(TABLE_STATE* ts) {
   if (ts->stage_next_free) {
     size_t offset = entry_offset(ts->stage_next_free, ts);
@@ -233,6 +253,7 @@ size_t get_stage_next_free(TABLE_STATE* ts) {
     return curr;
   }
 }
+*/
 
 void header_write(size_t ncols, size_t name_len, size_t* col_types, const char** col_names, FILE* file) {
   char* info_header = (char*)malloc(sizeof(char) * NAMES_OFFSET);
@@ -272,19 +293,19 @@ void header_write(size_t ncols, size_t name_len, size_t* col_types, const char**
   size_t rb_offset = NAMES_OFFSET + ncols*(name_len+1);
   for (size_t t = 0; t < nkey_fields; t++) {
     memcpy(&result[rb_offset + t * RB_DATA_SIZE], &rb_nil, RB_DATA_SIZE);
-    fprintf(stderr, "%ld: %lx\n", t, *(size_t*)&result[rb_offset + t * sizeof(size_t)]);
+    // fprintf(stderr, "%ld: %lx\n", t, *(size_t*)&result[rb_offset + t * sizeof(size_t)]);
   }
   size_t index = 0;
-  fprintf(stderr, "sz: %lx\n", header_size);
-  fprintf(stderr, "%08lx: ", index);
+  // fprintf(stderr, "sz: %lx\n", header_size);
+  // fprintf(stderr, "%08lx: ", index);
   for (size_t i = 0; i < header_size; i += 2) {
-    fprintf(stderr, "%02x%02x ", (unsigned char)result[i], (unsigned char)result[i+1]);
+    // fprintf(stderr, "%02x%02x ", (unsigned char)result[i], (unsigned char)result[i+1]);
     if (i % 16 == 14) {
       index += 16;
-      fprintf(stderr, "\n%08lx: ", index);
+      // fprintf(stderr, "\n%08lx: ", index);
     }
   }
-  fprintf(stderr, "\n");
+  // fprintf(stderr, "\n");
   
   rewind(file);
   fwrite(result, header_size, 1, file);
@@ -303,14 +324,22 @@ size_t entry_offset(size_t index, TABLE_STATE* table_state) {
 }
 
 size_t tappend(void* entry, TABLE_STATE* table_state) { // TODO: add check if there is a free place in table
+  size_t next_empty = next_empty_read(table_state->file);
   size_t offset = table_state->append_offset;
-  fseek(table_state->file, offset, SEEK_SET);
-  size_t r = fwrite(entry, table_state->entry_raw_size, 1, table_state->file);
+  size_t was_empty = 0;
+  if (next_empty) {
+    was_empty = 1;
+    offset = entry_offset(next_empty, table_state);
+    next_empty_withdraw(table_state);
+  }
+  table_state->last_inserted = (offset - table_state->header_offset) / table_state->entry_raw_size;
+  fseek(table_state->file, offset + table_state->entry_metadata_size, SEEK_SET);
+  size_t r = fwrite(&((char*)entry)[table_state->entry_metadata_size], table_state->entry_size, 1, table_state->file);
   table_state->append_offset = ftell(table_state->file);
   size_t ret = 0;
   for (size_t i = 0; i < table_state->nkey_cols; i++) {
     ret = !rb_insert(table_state->rb_trees[i], entry);
-    if (ret) {
+    if (ret && !was_empty) {
       table_state->append_offset = offset;
       ftruncate(fileno(table_state->file), offset);
       break;
@@ -321,13 +350,44 @@ size_t tappend(void* entry, TABLE_STATE* table_state) { // TODO: add check if th
 }
 
 void tedit(void* data, TABLE_STATE* table_state) {
-  size_t index = *((size_t*)data);
-  size_t col = ((size_t*)data)[1];
-  void* val = ((size_t**)data)[2];
-  fseek(table_state->file, entry_offset(index, table_state), SEEK_SET);
-  fseek(table_state->file, table_state->col_offsets[col], SEEK_CUR);
-  ftell(table_state->file);
-  fwrite(val, sizeof(char), TYPE_SIZE(table_state->col_types[col]), table_state->file);
+  size_t col = *((size_t*)data);
+  size_t size = TYPE_SIZE(table_state->col_types[col]);
+  void* old_value = &((char*)data)[sizeof(size_t)];
+  void* new_value = &((char*)data)[sizeof(size_t) + size];
+  void* entries;
+  size_t* indices;
+  size_t count = find_entry(col, old_value, table_state, &entries, &indices);
+
+  for (size_t i = 0; i < count; i++) {
+    table_state->last_inserted = indices[i];
+    if (IS_KEY(table_state->col_types[col])) {
+      rbtree* rbt = table_state->rb_trees[table_state->key_col_relpos[col]];
+      rb_delete(rbt, indices[i], 1);
+      rb_insert(rbt, new_value);
+    } else {
+      size_t offset = entry_offset(indices[i], table_state);
+      fseek(table_state->file, offset + table_state->col_offsets[col], SEEK_SET);
+      fwrite(&((char*)data)[table_state->col_offsets[col]], TYPE_SIZE(table_state->col_types[col]), 1, table_state->file);
+    }
+  }
+}
+
+size_t tdelete(void *data, TABLE_STATE* table_state) {
+  size_t col = *(size_t*)data;
+  void* value = &((char*)data)[sizeof(size_t)];
+  char* query = get_by_tindex(0, table_state);
+  memcpy(&query[table_state->col_offsets[col]], value, TYPE_SIZE(table_state->col_types[col]));
+  size_t is_key = IS_KEY(table_state->col_types[col]);
+  if (is_key) {
+    size_t *index;
+    size_t count = find_entry(col, query, table_state, NULL, &index); // TODO :
+    for (size_t i = 0; *index && i < table_state->nkey_cols; i++) {
+      rb_delete(table_state->rb_trees[i], *index, 0);
+    }
+    return *index;
+  } else {
+    assert(0 && "Not implemented yet");
+  }
 }
 
 unsigned char table_version(FILE* file) {
@@ -344,10 +404,18 @@ size_t next_empty_read(FILE* file) {
   return pos;
 }
 
-size_t next_empty_update(TABLE_STATE* ts) {
+size_t next_empty_write(FILE* file, size_t node_ptr) {
+  fseek(file, 1, SEEK_SET);
+  return fwrite(&node_ptr, sizeof(size_t), 1, file);
+}
+
+size_t next_empty_withdraw(TABLE_STATE* ts) {
   size_t curr_empty = next_empty_read(ts->file);
-  assert(curr_empty != 0);
-  // TODO: 
+  if (curr_empty != 0) {
+    size_t* next_empty_entry = get_by_tindex(curr_empty, ts);
+    next_empty_write(ts->file, next_empty_entry[RB_INDEX_PARENT]);
+    free(next_empty_entry);
+  }
 }
 
 unsigned char read_ncols(FILE* file) {
@@ -386,7 +454,7 @@ void read_col_types(TABLE_STATE* table_state) {
     col_offset += TYPE_SIZE(type_);
     key_col_relpos += IS_KEY(type_);
     nkey_cols += IS_KEY(type_);
-    printf("%ld\n", TYPE_SIZE(type_));
+    // printf("%ld\n", TYPE_SIZE(type_));
   }
 
   table_state->nkey_cols = nkey_cols;
@@ -432,7 +500,7 @@ void header_read(FILE* file, TABLE_STATE* table_state) {
 
   table_state->file      = file;
   table_state->version   = table_version(file);
-  table_state->stage_next_free = next_empty_read(file);
+  // table_state->stage_next_free = next_empty_read(file);
   assert(table_state->version == sizeof(size_t));
   table_state->ncols     = read_ncols(file);
   table_state->name_len  = read_name_len(file);
@@ -456,7 +524,7 @@ void header_read(FILE* file, TABLE_STATE* table_state) {
   
   fseek(file, 0L, SEEK_END);
   table_state->stage_append_offset = table_state->append_offset = ftell(file);
-  printf("header_offset: %lx\nappend_offset: %lx\n", table_state->header_offset, table_state->append_offset);
+  // printf("header_offset: %lx\nappend_offset: %lx\n", table_state->header_offset, table_state->append_offset);
   rewind(file);
   table_state->file = file;
   table_state->init = 1;
@@ -464,16 +532,7 @@ void header_read(FILE* file, TABLE_STATE* table_state) {
   table_state->entry_raw_size = table_state->entry_metadata_size + table_state->entry_size;
 
   for(size_t i = 0; i < table_state->ncols; i++) {
-    int (*cmp)(const void*, const void*, const void*);
-    size_t tnum = TYPE_NUMBER(table_state->col_types[i]);
-    if (tnum == TABLE_TYPE_INT)
-      cmp = cmp_int;
-    if (tnum == TABLE_TYPE_FLOAT)
-      cmp = cmp_float;
-    if (tnum == TABLE_TYPE_VARCHAR)
-      cmp = cmp_str;
-    if (tnum == TABLE_TYPE_DATETIME)
-      cmp = cmp_datatime;
+    int (*cmp)(const void*, const void*, const void*) = pick_cmp(table_state->col_types[i]);
     if (IS_KEY(table_state->col_types[i])) {
       table_state->rb_trees[table_state->key_col_relpos[i]] = rb_restore_from_table(table_state->key_col_relpos[i], table_state, cmp);
     }
@@ -514,9 +573,9 @@ void create_entry(TABLE_STATE* table_state, size_t nargs, ...) {
       strcpy(it, val);
       it += TYPE_SIZE(table_state->col_types[i]);
     }
-    if (TYPE_NUMBER(table_state->col_types[i]) == TABLE_TYPE_DATETIME) {
+    if (TYPE_NUMBER(table_state->col_types[i]) == TABLE_TYPE_DATATIME) {
       const char* val = va_arg(args, const char*);
-      memcpy(it, val, DATETIME_SIZE);
+      memcpy(it, val, DATATIME_SIZE);
       it += TYPE_SIZE(table_state->col_types[i]);
     }
   }
@@ -525,18 +584,8 @@ void create_entry(TABLE_STATE* table_state, size_t nargs, ...) {
   se->data = data;
   da_append(&table_state->stage, se);
   va_end(args);
-  printf("WRITING\n");
-  display_entry(data, table_state->entry_raw_size);
-}
-
-void edit_entry(size_t entry_index, size_t column_number, void* new_val, TABLE_STATE* table_state) {
-  STAGE_EVENT *se = malloc(sizeof(STAGE_EVENT));
-  se->type = SE_EDIT;
-  se->data = malloc(sizeof(size_t) * 2 + sizeof(void*));
-  memcpy(se->data, &entry_index, sizeof(size_t));
-  memcpy(se->data + sizeof(size_t) / sizeof(char), &column_number, sizeof(size_t));
-  memcpy(se->data + 2 * sizeof(size_t) / sizeof(char), &new_val, sizeof(void*));
-  da_append(&table_state->stage, se);
+  // printf("WRITING\n");
+  // display_entry(data, table_state->entry_raw_size);
 }
 
 void commit_changes(TABLE_STATE* table_state) {
@@ -545,6 +594,9 @@ void commit_changes(TABLE_STATE* table_state) {
     if (se->type == SE_CREATE) {
       tappend(se->data, table_state);
       free(se->data);
+    }
+    if (se->type == SE_DELETE) {
+      tdelete(se->data, table_state);
     }
     if (se->type == SE_EDIT) {
       tedit(se->data, table_state);
@@ -563,7 +615,9 @@ char* get_by_tindex(size_t index, TABLE_STATE* table_state) {
 }
 
 size_t create_table(size_t ncols, size_t name_len, size_t* col_types, const char** col_names, const char* file_name) {
-  assert(access(file_name, F_OK) == 0); // Check if the file doesn't exist
+  if (access(file_name, F_OK) == 0) {// Check if the file doesn't exist
+    return 1;
+  }
   FILE* file = fopen(file_name, "wb");
   header_write(ncols, name_len, col_types, col_names, file);
   fclose(file);
@@ -603,6 +657,7 @@ size_t save_table(TABLE_STATE* table_state) {
 }
 
 void display_entry(unsigned char* entry, size_t size) {
+  printf("sz: %ld\n", size);
   for (size_t i = 0; i < size; i+=2) {
     printf("%02x%02x ", entry[i], entry[i+1]);
     if (i % 16 == 14) printf("\n");
@@ -653,13 +708,65 @@ void rb_from_raw_table(rbtree* rbt, TABLE_STATE* table_state) {
   }
 }
 
-size_t find_entry(size_t col, void* value, TABLE_STATE* table_state) {
+size_t find_entry(size_t col, void* value, TABLE_STATE* table_state, void** result, size_t** indices) {
   size_t is_key = IS_KEY(table_state->col_types[col]);
-  assert(is_key);
   if (is_key) {
     size_t index = rb_find(table_state->rb_trees[table_state->key_col_relpos[col]], value);
-    return index;
+    if (result && index) {
+      *result = get_by_tindex(index, table_state);
+    }
+    if (indices && index) {
+      *indices = malloc(sizeof(size_t));
+      (*indices)[0] = index;
+    }
+    return (index ? 1 : 0);
+  } else {
+    rbtree rbt = { 0 };
+    rbt.col = col;
+    rbt.table_state = table_state;
+    int (*cmp)(const void*, const void*, const void*) = pick_cmp(table_state->col_types[col]);
+    rbt.compare = cmp;
+    struct darray entr = { 0 }, indx = { 0 };
+    size_t diff = (table_state->append_offset - table_state->header_offset); 
+    size_t len = diff / table_state->entry_raw_size;
+    // fprintf(stderr, "DIFF: %ld Len: %ld\n", diff, len);
+    for (size_t i = 1; i < len; i++) {
+      void* entry = get_by_tindex(i, table_state);  
+      // display_entry(entry, table_state->entry_raw_size);
+      if (rbt.compare(&rbt, value, entry) == 0) {
+        da_append(&entr, entry);
+        da_append(&indx, i);
+      }
+    }
+    if (result)
+      *result = entr.items;
+    if (indices)
+      *indices = indx.items;
+    return entr.count;
   }
+}
+
+size_t delete_entry(size_t col, void* value, TABLE_STATE* table_state) {
+  size_t size = TYPE_SIZE(table_state->col_types[col]);
+  STAGE_EVENT *se = malloc(sizeof(STAGE_EVENT));
+  se->type = SE_DELETE;
+  se->data = malloc(sizeof(size_t) + size);
+  memcpy(se->data, &col, sizeof(size_t));
+  memcpy(&se->data[sizeof(size_t)], value, size);
+  da_append(&table_state->stage, se);
+  return 0;
+}
+
+size_t edit_entry(size_t col, void* old_value, void* new_value, TABLE_STATE* table_state) {
+  size_t size = TYPE_SIZE(table_state->col_types[col]);
+  STAGE_EVENT *se = malloc(sizeof(STAGE_EVENT));
+  se->type = SE_EDIT;
+  se->data = malloc(sizeof(size_t) + 2 * size);
+  memcpy(se->data, &col, sizeof(size_t));
+  memcpy(&se->data[sizeof(size_t)], old_value, size);
+  memcpy(&se->data[sizeof(size_t) + size], new_value, size);
+  da_append(&table_state->stage, se);
+  return 0;
 }
 
 #endif // TABLE_FILE_H_IMPLEMENTATION
