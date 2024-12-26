@@ -124,7 +124,7 @@ size_t edit_entry(size_t col, void* old_val, void* new_val, TABLE_STATE* table_s
 
 void commit_changes(TABLE_STATE* table_state);
 
-char* get_by_tindex(size_t index, TABLE_STATE* table_state);
+void* get_by_tindex(size_t index, TABLE_STATE* table_state);
 
 size_t create_table(size_t ncols, size_t name_len, size_t* col_types, const char** col_names, const char* file_name);
 size_t open_table(const char* file_name, TABLE_STATE* table_state);
@@ -287,6 +287,7 @@ size_t get_stage_next_free(TABLE_STATE* ts) {
 
 void header_write(size_t ncols, size_t name_len, size_t* col_types, const char** col_names, FILE* file) {
   char* info_header = (char*)malloc(sizeof(char) * NAMES_OFFSET);
+  memset(info_header, 0, NAMES_OFFSET);
   
   info_header[0] = sizeof(size_t);
   
@@ -311,6 +312,7 @@ void header_write(size_t ncols, size_t name_len, size_t* col_types, const char**
 
   size_t header_size = NAMES_OFFSET + ncols*(name_len+1) + nkey_fields * RB_DATA_SIZE;
   char* result = (char*)malloc(header_size);
+  memset(result, 0, header_size);
   
   memcpy(result, info_header, NAMES_OFFSET);
   
@@ -427,9 +429,11 @@ size_t tdelete(void *data, TABLE_STATE* table_state) {
       rb_delete(table_state->rb_trees[i], *index, 0);
     }
     if (query) free(query);
-    return *index;
+    size_t val = *index;
+    free(index);
+    return val;
   } else {
-    size_t *indices;
+    size_t *indices = NULL;
     size_t count = find_entry(col, query, table_state, NULL, &indices);
     for (size_t i = 0; i < count; i++) {
       for (size_t j = 0; j < table_state->nkey_cols; j++) {
@@ -449,6 +453,7 @@ size_t tdelete(void *data, TABLE_STATE* table_state) {
       fwrite(&minusone, sizeof(size_t), 1, table_state->file);
     }
     if (query) free(query);
+    if (indices) free(indices);
   }
 }
 
@@ -607,7 +612,8 @@ void create_entry(TABLE_STATE* table_state, size_t nargs, ...) {
 
   va_list args;
   va_start(args, nargs);
-  char* data = malloc(table_state->entry_raw_size);
+  char* data = malloc(sizeof(char) * table_state->entry_raw_size);
+  memset(data, 0, table_state->entry_raw_size);
   char* it = data;
 
   // TODO: maybe refactor this to tree handling
@@ -659,6 +665,7 @@ void commit_changes(TABLE_STATE* table_state) {
     }
     if (se->type == SE_DELETE) {
       tdelete(se->data, table_state);
+      free(se->data);
     }
     if (se->type == SE_EDIT) {
       tedit(se->data, table_state);
@@ -669,10 +676,10 @@ void commit_changes(TABLE_STATE* table_state) {
   fflush(table_state->file);
 }
 
-char* get_by_tindex(size_t index, TABLE_STATE* table_state) {
+void* get_by_tindex(size_t index, TABLE_STATE* table_state) {
   fseek(table_state->file, entry_offset(index, table_state), SEEK_SET);
-  char* buf = malloc(table_state->entry_raw_size);
-  fread(buf, 1, table_state->entry_raw_size, table_state->file);
+  void* buf = malloc(table_state->entry_raw_size);
+  fread(buf, table_state->entry_raw_size, 1, table_state->file);
   return buf;
 }
 
@@ -683,6 +690,7 @@ size_t create_table(size_t ncols, size_t name_len, size_t* col_types, const char
   FILE* file = fopen(file_name, "wb");
   header_write(ncols, name_len, col_types, col_names, file);
   fclose(file);
+  file = NULL;
   return 0;
 }
 
@@ -696,10 +704,23 @@ size_t open_table(const char* file_name, TABLE_STATE* table_state) {
 }
 
 size_t close_table(TABLE_STATE *table_state) {
-  fclose(table_state->file);
+  if (table_state->file) {
+    fclose(table_state->file);
+    table_state->file = NULL;
+  }
   free(table_state->col_offsets);
   free(table_state->col_types);
+  for (size_t i = 0; i < table_state->ncols; i++) {
+    free(table_state->col_names[i]);
+  }
   free(table_state->col_names);
+  free(table_state->key_col_relpos);
+  for (size_t i = 0; i < table_state->nkey_cols; i++) {
+    free(table_state->rb_trees[i]->copy_data);
+    free(table_state->rb_trees[i]);
+  }
+  free(table_state->rb_trees);
+  free(table_state->stage.items);
 }
 
 size_t delete_table(const char* file_name) {
@@ -712,8 +733,10 @@ size_t erase_table(const char* file_name) {
   TABLE_STATE table_state = { 0 };
   open_table(file_name, &table_state);
   fclose(table_state.file);
+  table_state.file = NULL;
   delete_table(file_name);
   create_table(table_state.ncols, table_state.name_len, table_state.col_types, table_state.col_names, file_name);
+  close_table(&table_state);
 }
 
 size_t save_table(TABLE_STATE* table_state) {
@@ -835,17 +858,21 @@ size_t find_entry(size_t col, void* value, TABLE_STATE* table_state, void** resu
     size_t count = 0;
     for (size_t i = 1; i < len; i++) {
       void* entry = get_by_tindex(i, table_state);  
-      // display_entry(entry, table_state->entry_raw_size);
-      if (((size_t*)entry)[RB_INDEX_COLOR] == -1) // deleted row
-        continue;
-      if (rbt.compare(&rbt, value, entry) == 0) {
-        count++;
-        if (result)
-          da_append(&entr, entry);
-        if (indices)
-          da_append(&indx, i);
+      size_t used = 0;
+      if (((size_t*)entry)[RB_INDEX_COLOR] != -1) { // deleted row
+        if (rbt.compare(&rbt, value, entry) == 0) {
+          count++;
+          if (result) {
+            da_append(&entr, entry);
+            used = 1;
+          }
+          if (indices)
+            da_append(&indx, i);
+        }
       }
-      if (!result) free(entry);
+      if (!used) {
+        free(entry);
+      }
     }
     if (result)
       *result = entr.items;

@@ -1,3 +1,5 @@
+# valgrind --track-origins=yes -s --leak-check=full
+clear
 echo "DELETE TABLE"
    ./build/delete_table
 echo "CREATE TABLE"

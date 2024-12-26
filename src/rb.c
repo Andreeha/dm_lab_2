@@ -428,7 +428,7 @@ size_t rb_insert(rbtree *rbt, void *data)
 	// RB_FIRST(rbt)->color = BLACK;
   set_color(rbt, RB_FIRST_PTR(rbt), BLACK);
 	
-	return new_node_ptr;
+	return current_ptr;// new_node_ptr;
 }
 
 /*
