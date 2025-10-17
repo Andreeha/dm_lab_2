@@ -1,3 +1,5 @@
+// TODO: if path to the file does not exists open_table segfaults
+
 #ifndef TABLE_FILE_H
 #define TABLE_FILE_H
 
@@ -631,6 +633,7 @@ void create_entry(TABLE_STATE* table_state, size_t nargs, ...) {
       memcpy(it, &val, sizeof(int));
       it += sizeof(int) / sizeof(char);
     }
+    // TODO: if passed as integer fucks up the remaining part of vargs
     if (TYPE_NUMBER(table_state->col_types[i]) == TABLE_TYPE_FLOAT) {
       float val = va_arg(args, double);
       memcpy(it, &val, sizeof(float));
