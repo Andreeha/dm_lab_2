@@ -1,5 +1,3 @@
-// TODO: if path to the file does not exists open_table segfaults
-
 #ifndef TABLE_FILE_H
 #define TABLE_FILE_H
 
@@ -687,7 +685,22 @@ void* get_by_tindex(size_t index, TABLE_STATE* table_state) {
 }
 
 size_t create_table(size_t ncols, size_t name_len, size_t* col_types, const char** col_names, const char* file_name) {
-  if (access(file_name, F_OK) == 0) {// Check if the file doesn't exist
+  char path_to_file[1024]; // TODO: path to file might be greater than 1024 characters
+
+  int ptfl = 0;
+
+  for (int i = strlen(file_name)-1; i >= 0; i++)
+    if (file_name[i] == '/') {
+      ptfl = i;
+      break;
+    }
+
+  memcpy(path_to_file, file_name, ptfl);
+  if (ptfl && access(path_to_file, F_OK) != 0) { // Path to file doesn't exist
+    return 1;
+  }
+
+  if (access(file_name, F_OK) == 0) { // Check if the file doesn't exist
     return 1;
   }
   FILE* file = fopen(file_name, "wb");
